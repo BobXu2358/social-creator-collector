@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Social collector output row",
+  "type": "object",
+  "required": ["business_id", "platform", "account_id", "content_id", "collected_at"],
+  "properties": {
+    "business_id": { "type": "string", "enum": ["xgame", "chapingjun"] },
+    "platform": { "type": "string", "enum": ["bilibili", "douyin"] },
+    "account_id": { "type": "string" },
+    "content_id": { "type": "string" },
+    "content_title": { "type": ["string", "null"] },
+    "published_at": { "type": ["string", "null"] },
+    "collected_at": { "type": "string" },
+    "metrics": { "type": "object" },
+    "source_url": { "type": ["string", "null"] },
+    "raw_ref": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}
+

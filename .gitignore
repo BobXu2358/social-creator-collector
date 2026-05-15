@@ -1,0 +1,13 @@
+_secrets/
+*.credentials.json
+*.cookies.json
+*.storage_state.json
+playwright-profile/
+playwright-profile-*/
+*.pyc
+__pycache__/
+.venv/
+*.png
+*.jpg
+*.tgz
+.DS_Store
