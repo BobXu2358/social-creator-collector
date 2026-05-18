@@ -22,25 +22,28 @@ except ImportError:
     sys.exit(1)
 
 
-# bvid ↔ aid conversion (standard B站 encoding)
-TABLE = "fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF"
-TR = {TABLE[i]: i for i in range(58)}
-_S = [11, 10, 3, 8, 4, 6]
-_XOR = 177451812
-_ADD = 8728348608
+_VIEW_URL = "https://api.bilibili.com/x/web-interface/view"
 
 
-def bvid_to_aid(bvid: str) -> int:
-    r = sum(TR[bvid[_S[i]]] * (58 ** i) for i in range(6))
-    return (r - _ADD) ^ _XOR
+def resolve_video(*, bvid: str | None = None, aid: int | None = None) -> tuple[str, int]:
+    """Resolve (bvid, aid) via B站 view API.
 
-
-def aid_to_bvid(aid: int) -> str:
-    aid = (aid ^ _XOR) + _ADD
-    chars = ["B", "V", "1", "", "", "", "", "", "", "4", "", "1", "", "7", "", ""]
-    for i in range(6):
-        chars[_S[i]] = TABLE[aid // (58 ** i) % 58]
-    return "".join(chars)
+    The old offline BV1 ↔ aid math (6-position permutation, XOR 177451812,
+    ADD 8728348608) only encodes aids that fit in ~32 bits. Videos uploaded
+    after the 2023 aid expansion have aids > 2^32 (e.g. 116578179879252) and
+    use a longer BV encoding. The offline math silently produces wrong values
+    in both directions for those videos. Always go through the API instead.
+    """
+    params = {"bvid": bvid} if bvid else {"aid": aid}
+    resp = httpx.get(_VIEW_URL, params=params, timeout=15, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    })
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"view API error: code={data.get('code')}, message={data.get('message')}")
+    d = data.get("data") or {}
+    return d["bvid"], d["aid"]
 
 
 def load_cookie_from_file(path: str) -> dict[str, str]:
@@ -129,13 +132,12 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    # Resolve aid
-    if args.aid:
-        aid = args.aid
-        bvid = aid_to_bvid(aid)
-    else:
-        bvid = args.bvid
-        aid = bvid_to_aid(bvid)
+    # Resolve aid + bvid via API (works for both pre- and post-2023-expansion aids).
+    try:
+        bvid, aid = resolve_video(bvid=args.bvid, aid=args.aid)
+    except Exception as e:
+        print(f"Failed to resolve video: {e}", file=sys.stderr)
+        return 1
 
     # Resolve cookie
     if args.cookie_file:

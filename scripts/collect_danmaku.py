@@ -27,19 +27,11 @@ from typing import Any
 
 # ── bvid / aid / cid conversion ──────────────────────────────────────────
 
-TABLE = "fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF"
-TR = {TABLE[i]: i for i in range(58)}
-_S = [11, 10, 3, 8, 4, 6]
-_XOR = 177451812
-_ADD = 8728348608
-
-
-def bvid_to_aid(bvid: str) -> int:
-    r = sum(TR[bvid[_S[i]]] * (58 ** i) for i in range(6))
-    return (r - _ADD) ^ _XOR
-
-
 # ── API helpers ──────────────────────────────────────────────────────────
+# Note: this script resolves bvid → aid/cid via the x/web-interface/view
+# API in get_video_info() below. The old offline BV1↔aid math (XOR/ADD over
+# a 6-position permutation) only handles aids that fit in ~32 bits and
+# silently breaks for post-2023-expansion long aids — don't reintroduce it.
 
 def get_video_info(bvid: str) -> dict[str, Any]:
     """Fetch video metadata. Returns {aid, cid, title, duration, pages}."""
