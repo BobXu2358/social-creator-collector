@@ -12,6 +12,7 @@ import argparse
 import json
 import sys
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -64,9 +65,18 @@ def fetch_comments(
 ) -> list[dict]:
     """Collect top-level comments from B站 x/v2/reply/main.
 
-    Uses mode=3 (newest-first). Requires valid SESSDATA cookie.
+    Uses mode=3 (newest-first) with cursor-based pagination. Requires a valid
+    SESSDATA cookie. Comments are deduped by rpid as a belt-and-suspenders
+    guard against any residual page-boundary overlap.
+
+    Note on pagination: the `pn=N` parameter LOOKS like it works but actually
+    returns page 1 every time on mode=3 — you must use the opaque
+    `cursor.pagination_reply.next_offset` token returned with each response,
+    wrapped as `pagination_str=urlencode({"offset": next_offset})`. We
+    discovered this the hard way after seeing 80–95% duplicate rates with
+    naive pn-based pagination.
     """
-    all_comments: list[dict] = []
+    by_rpid: dict[int, dict] = {}
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -75,9 +85,17 @@ def fetch_comments(
         "Referer": f"https://www.bilibili.com/video/av{aid}",
     }
     client = httpx.Client(cookies=cookie, headers=headers, timeout=30)
+    base = f"https://api.bilibili.com/x/v2/reply/main?type=1&oid={aid}&mode=3&ps=20"
+    next_offset: str | None = None
 
-    for pn in range(1, max_pages + 1):
-        url = f"https://api.bilibili.com/x/v2/reply/main?type=1&oid={aid}&mode=3&ps=20&pn={pn}"
+    for page in range(1, max_pages + 1):
+        url = base
+        if next_offset:
+            pag = urllib.parse.quote(
+                json.dumps({"offset": next_offset}, separators=(",", ":"))
+            )
+            url = f"{base}&pagination_str={pag}"
+
         resp = client.get(url)
         resp.raise_for_status()
         data = resp.json()
@@ -87,30 +105,47 @@ def fetch_comments(
             print(f"API error: code={code}, message={data.get('message')}", file=sys.stderr)
             break
 
-        replies = data.get("data", {}).get("replies") or []
+        body = data.get("data") or {}
+        replies = body.get("replies") or []
         if not replies:
             break
 
+        new_this_page = 0
         for r in replies:
+            rpid = r.get("rpid")
+            if rpid is None or rpid in by_rpid:
+                continue
             member = r.get("member") or {}
             content = r.get("content") or {}
-            all_comments.append({
-                "rpid": r.get("rpid"),
+            by_rpid[rpid] = {
+                "rpid": rpid,
                 "mid": r.get("mid"),
                 "uname": member.get("uname"),
                 "message": content.get("message"),
                 "ctime": r.get("ctime"),
                 "like": r.get("like"),
                 "rcount": r.get("rcount"),
-            })
+            }
+            new_this_page += 1
 
-        cursor = data.get("data", {}).get("cursor", {})
-        # Stop if we've collected as many top-level as there are total (approximate)
-        if len(all_comments) >= cursor.get("all_count", 0):
+        cursor = body.get("cursor") or {}
+        # Stop conditions: end of feed, page returned zero new items, or
+        # we've already collected the full top-level count.
+        if cursor.get("is_end"):
+            break
+        if new_this_page == 0:
+            break
+        if len(by_rpid) >= cursor.get("all_count", 0):
             break
 
-        if pn < max_pages:
+        next_offset = (cursor.get("pagination_reply") or {}).get("next_offset")
+        if not next_offset:
+            break
+
+        if page < max_pages:
             time.sleep(delay_ms / 1000)
+
+    all_comments = list(by_rpid.values())
 
     client.close()
     return all_comments
