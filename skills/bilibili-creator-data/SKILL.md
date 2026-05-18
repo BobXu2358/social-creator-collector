@@ -240,6 +240,10 @@ python scripts/collect_creator_data.py \
   --days 14
 ```
 
+## Danmaku Analytics
+
+For danmaku (弹幕) collection and peak-density analysis, use the `danmaku-analytics` skill. It covers the deflate-compressed XML endpoint, time-bucket peak detection, keyword extraction at peaks, and cross-format comparison with comments.
+
 ## Comment Collection & Analysis
 
 For comment scraping and feedback analysis, use the `comment-analytics` skill. It documents the correct B站 comment endpoint (`x/v2/reply/main`, not `x/v2/reply/wbi/main` which silently returns only 3 top comments), pagination, anti-412 cookie strategy, and structured comment feedback analysis (sentiment, themes, actionable insights).

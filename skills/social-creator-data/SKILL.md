@@ -182,6 +182,10 @@ The `粉丝增量` column (index 13, 0-based) contains the per-video fan growth 
   - collect creator-center `work_list` pages and filter by recent days;
   - **extract per-video fan growth from 投稿列表 DOM** (no API — DOM only).
 
+## Danmaku Analytics
+
+For danmaku (弹幕) collection and peak analysis, use the `danmaku-analytics` skill. It handles deflate-compressed XML, time-bucket density, keyword extraction at peaks, and cross-format comparison.
+
 ## Comment Feedback Analysis
 
 For collecting and analyzing comments on published videos, use the `comment-analytics` skill. It covers B站 comment API (`x/v2/reply/main` with cookie), 抖音 comment extraction, and structured feedback analysis (sentiment, themes, actionable feedback, cross-platform comparison). Key anti-pitfall: never use `x/v2/reply/wbi/main` (returns only 3 hot comments) or public/unauth endpoints (triggers 412).
