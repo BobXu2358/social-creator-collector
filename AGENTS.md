@@ -22,6 +22,22 @@ python -m playwright install chromium    # only needed for the Douyin commands
 `python -m collector`). Examples below use `python -m collector` so they work
 without installing.
 
+## Staying current
+
+The tool lives upstream — fixes (especially when Douyin changes its DOM) ship there, not in
+your installed copy. There is no auto-update; with a pinned version, updating is deliberate.
+
+- Check your version: `collector --version`. Latest = the highest tag at the repo's `/tags`.
+- Update: `pip install -U "git+https://github.com/BobXu2358/social-creator-collector@<tag>"`
+  — or track `main` instead of a tag if you want fixes the moment they land.
+- **Never patch the installed package locally.** Editing the core forks it, and the next update
+  silently reverts you. Fixes go upstream as a PR, then everyone re-installs (one fix heals all).
+
+When a command **fails loud** with a "Douyin changed / column not found / layout changed" error,
+that's the known-fragile DOM path: first update to the latest release (it may already be fixed);
+if it still fails on the latest version, the fix isn't out yet — report it upstream (open an
+issue). Don't hack your copy.
+
 Chromium is resolved cross-platform (see `collector/browser.py`): the default is
 Playwright's bundled browser — no hardcoded path. Override with `--chromium <path>`,
 `$SCC_CHROMIUM`, or `$SCC_CHROMIUM_CHANNEL=chrome` to use installed Chrome.

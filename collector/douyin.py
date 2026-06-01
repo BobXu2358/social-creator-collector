@@ -404,7 +404,9 @@ async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str
             await page.locator("text=投稿列表").first.click(timeout=8000)
         except Exception as exc:
             raise CollectorError(
-                "could not find the 投稿列表 tab — data-center layout changed or not logged in"
+                "could not find the 投稿列表 tab — either not logged in, or Douyin changed "
+                "data-center. If logged in, update to the latest release / report upstream "
+                "(see AGENTS.md 'Staying current')."
             ) from exc
         await page.wait_for_timeout(5000)
 
@@ -428,8 +430,8 @@ async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str
     parsed = _parse_fan_table(table)
     if not parsed:
         raise CollectorError(
-            f"'{_FAN_COL}' column not found in 投稿列表 — Douyin changed the table; "
-            "re-inspect the DOM and update collector/douyin.py."
+            f"'{_FAN_COL}' column not found in 投稿列表 — Douyin changed the table. Update to the "
+            "latest release; if already current, report upstream (see AGENTS.md 'Staying current')."
         )
 
     captured = datetime.now(TZ).isoformat()
