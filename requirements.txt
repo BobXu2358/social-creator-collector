@@ -1,0 +1,4 @@
+# Bilibili path is plain httpx; Douyin path drives headless Chromium via Playwright.
+# After installing, fetch the bundled browser once: python -m playwright install chromium
+httpx>=0.27
+playwright>=1.40

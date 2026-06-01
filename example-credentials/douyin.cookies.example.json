@@ -1,0 +1,7 @@
+[
+  { "name": "sessionid", "value": "paste_here", "domain": ".douyin.com", "path": "/" },
+  { "name": "sessionid_ss", "value": "paste_here", "domain": ".douyin.com", "path": "/" },
+  { "name": "sid_guard", "value": "paste_here", "domain": ".douyin.com", "path": "/" },
+  { "name": "uid_tt", "value": "paste_here", "domain": ".douyin.com", "path": "/" },
+  { "name": "passport_csrf_token", "value": "paste_here", "domain": ".douyin.com", "path": "/" }
+]
