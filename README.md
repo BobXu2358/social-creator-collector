@@ -31,6 +31,8 @@ python -m collector douyin   login   --account xgame   # 弹窗扫码 → 存 se
 python -m collector douyin   worklist --account xgame --days 30
 ```
 
+> **Windows（PowerShell）**：把第一行换成 `py -3 -m venv .venv` 再 `.\.venv\Scripts\Activate.ps1`（别用系统自带的 `python`——那通常是微软商店占位符，先 `winget install Python.Python.3.12` 装真 Python，用 `py -V` 确认）。其余命令一致；`tzdata` 会随依赖自动装。只用 B站 可跳过 `playwright install chromium`（纯 HTTP，不开浏览器）。
+
 `login` 会弹一个真浏览器窗口、平台自己出二维码、你手机扫一下就存好登录态——不用再手动导 cookie。代价是它需要桌面会话（无头服务器跑不了）。cookie 过期就再 `login` 一次。
 
 ## 装成命令（给同事复用）
