@@ -9,9 +9,11 @@ Commands: probe, summary, comments, danmaku.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import statistics
+import sys
 import time
 import urllib.parse
 import zlib
@@ -89,6 +91,68 @@ def probe(*, ws: Path, account: str, credential_path: Path) -> dict[str, Any]:
         "uname": data.get("uname"),
         "level": (data.get("level_info") or {}).get("current_level"),
     }
+
+
+# ── QR login (headed browser; B站 renders its own QR on passport page) ────
+
+def login(*, ws: Path, account: str, credential_path: Path, chromium: str | None,
+          timeout_s: int = 180) -> dict[str, Any]:
+    return asyncio.run(_login_async(credential_path, chromium, timeout_s))
+
+
+async def _login_async(credential_path: Path, chromium: str | None, timeout_s: int) -> dict[str, Any]:
+    """Open a headed browser to passport.bilibili.com; the user scans the B站 QR.
+    Poll for SESSDATA+bili_jct, ensure buvid3 (a device cookie set on first visit),
+    then write the three creator cookies to the credential file. Never echoes values.
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:  # pragma: no cover - env dependent
+        raise CollectorError("playwright not installed — pip install playwright") from exc
+    from .browser import BUNDLED_HINT, launch_kwargs
+
+    credential_path.parent.mkdir(parents=True, exist_ok=True)
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.launch(headless=False, **launch_kwargs(chromium))
+        except Exception as exc:
+            raise CollectorError(f"{exc}\n\n{BUNDLED_HINT}") from exc
+        ctx = await browser.new_context()
+        page = await ctx.new_page()
+        await page.goto("https://passport.bilibili.com/login", wait_until="domcontentloaded", timeout=60000)
+        print("B站：浏览器窗口已打开，请用哔哩哔哩 App 扫码登录…", file=sys.stderr)
+        creds: dict[str, str] = {}
+        waited = 0
+        while waited < timeout_s * 1000:
+            jar = {c["name"]: c["value"] for c in await ctx.cookies()}
+            if jar.get("SESSDATA") and jar.get("bili_jct"):
+                creds = jar
+                break
+            await page.wait_for_timeout(2000)
+            waited += 2000
+        if not creds:
+            await browser.close()
+            raise CollectorError(
+                "Bilibili QR login timed out (no SESSDATA). Retry, or fall back to a "
+                "local credential file."
+            )
+        if not creds.get("buvid3"):
+            await page.goto("https://www.bilibili.com/", wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2000)
+            creds = {c["name"]: c["value"] for c in await ctx.cookies()}
+        mid = creds.get("DedeUserID")
+        await browser.close()
+
+    out = {k: creds.get(k, "") for k in REQUIRED_FIELDS}
+    missing = [k for k in REQUIRED_FIELDS if not out[k]]
+    if missing:
+        raise CollectorError(f"login succeeded but missing cookies {missing} — try again")
+    credential_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        credential_path.chmod(0o600)
+    except OSError:
+        pass
+    return {"ok": True, "credential": str(credential_path), "mid": mid, "method": "qr-login"}
 
 
 # ── creator-center summary (fan trend + per-video stats) ─────────────────

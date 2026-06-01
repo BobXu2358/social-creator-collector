@@ -90,6 +90,16 @@ class CliBehavior(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("storage state", err)
 
+    def test_login_bad_chromium_fails_loud_without_hanging(self):
+        # A nonexistent browser binary makes the headed launch fail immediately —
+        # no window, no scan — so login's error path is testable offline.
+        for platform in ("bilibili", "douyin"):
+            with tempfile.TemporaryDirectory() as tmp:
+                code, _, err = _run(platform, "login", "--account", "xgame", "--workspace", tmp,
+                                    "--chromium", "/nonexistent/chromium-binary", "--timeout", "1")
+                self.assertEqual(code, 2, f"{platform}: {err}")
+                self.assertIn("ERROR", err)
+
 
 class PureParsers(unittest.TestCase):
     def test_parse_fan_growth_int(self):

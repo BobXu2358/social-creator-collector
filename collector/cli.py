@@ -83,6 +83,10 @@ def _build_parser() -> argparse.ArgumentParser:
     common.add_argument("--account", required=True, help="account/business namespace, e.g. xgame")
     common.add_argument("--profile", default="default", help="credential profile name")
 
+    def _chromium(parser):
+        parser.add_argument("--chromium", default="",
+                            help="Chromium binary path (default: Playwright bundled)")
+
     # init
     g_init = groups.add_parser("init", parents=[common], help="create account folder structure")
     g_init.set_defaults(func=_init)
@@ -90,6 +94,15 @@ def _build_parser() -> argparse.ArgumentParser:
     # bilibili
     g_bili = groups.add_parser("bilibili", help="Bilibili (httpx) commands")
     bili = g_bili.add_subparsers(dest="action", required=True)
+
+    b_login = bili.add_parser("login", parents=[common],
+                              help="QR scan login (headed browser) → credential file")
+    b_login.add_argument("--credential", default="")
+    b_login.add_argument("--timeout", type=int, default=180, dest="timeout_s")
+    _chromium(b_login)
+    b_login.set_defaults(func=lambda a: bilibili.login(
+        ws=_ws(a), account=a.account, credential_path=_bili_credential(a),
+        chromium=a.chromium or None, timeout_s=a.timeout_s))
 
     b_probe = bili.add_parser("probe", parents=[common], help="verify B站 login + identity")
     b_probe.add_argument("--credential", default="")
@@ -131,9 +144,14 @@ def _build_parser() -> argparse.ArgumentParser:
     g_dy = groups.add_parser("douyin", help="Douyin (Playwright) commands")
     dy = g_dy.add_subparsers(dest="action", required=True)
 
-    def _chromium(parser):
-        parser.add_argument("--chromium", default="",
-                            help="Chromium binary path (default: Playwright bundled)")
+    d_login = dy.add_parser("login", parents=[common],
+                            help="QR scan login (headed browser) → storage state")
+    d_login.add_argument("--storage-state", default="", dest="storage_state")
+    d_login.add_argument("--timeout", type=int, default=180, dest="timeout_s")
+    _chromium(d_login)
+    d_login.set_defaults(func=lambda a: douyin.login(
+        ws=_ws(a), account=a.account, state_path=_douyin_state(a),
+        chromium=a.chromium or None, timeout_s=a.timeout_s))
 
     d_chk = dy.add_parser("check-cookies", parents=[common], help="validate Cookie-Editor export")
     d_chk.add_argument("--cookies", default="")

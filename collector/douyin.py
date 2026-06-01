@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -41,9 +42,9 @@ def _import_playwright():
     return async_playwright
 
 
-async def _launch(p, chromium: str | None):
+async def _launch(p, chromium: str | None, *, headless: bool = True):
     try:
-        return await p.chromium.launch(headless=True, **launch_kwargs(chromium))
+        return await p.chromium.launch(headless=headless, **launch_kwargs(chromium))
     except Exception as exc:  # bundled browser missing → actionable message
         raise CollectorError(f"{exc}\n\n{BUNDLED_HINT}") from exc
 
@@ -124,6 +125,48 @@ async def _import_cookies(cookies_path, state_path, chromium, nickname, douyin_i
             "douyin_id_seen": bool(douyin_id and douyin_id in body),
         },
     }
+
+
+# ── QR login (headed browser; Douyin renders its own QR in the page) ──────
+
+def login(*, ws: Path, account: str, state_path: Path, chromium: str | None,
+          timeout_s: int = 180) -> dict[str, Any]:
+    return asyncio.run(_login(state_path, chromium, timeout_s))
+
+
+async def _login(state_path, chromium, timeout_s) -> dict[str, Any]:
+    """Open a real (headed) browser to creator.douyin.com; the user scans the QR
+    Douyin shows there. We poll for the ``sessionid`` cookie, then dump the full
+    storage state. Headless/remote QR is rejected by Douyin risk control, so this
+    deliberately runs headed — it needs a desktop session.
+    """
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    async_playwright = _import_playwright()
+    async with async_playwright() as p:
+        browser = await _launch(p, chromium, headless=False)
+        ctx = await browser.new_context(**_CTX)
+        page = await ctx.new_page()
+        await page.goto("https://creator.douyin.com/", wait_until="domcontentloaded", timeout=60000)
+        print("抖音：浏览器窗口已打开，请用抖音 App 扫码登录…", file=sys.stderr)
+        logged_in = False
+        waited = 0
+        while waited < timeout_s * 1000:
+            names = {c["name"] for c in await ctx.cookies()}
+            if "sessionid" in names or "sessionid_ss" in names:
+                logged_in = True
+                break
+            await page.wait_for_timeout(2000)
+            waited += 2000
+        if not logged_in:
+            await browser.close()
+            raise CollectorError(
+                "Douyin QR login timed out (no sessionid). Retry, or fall back to "
+                "Cookie-Editor export + import-cookies."
+            )
+        await page.wait_for_timeout(2000)  # let creator home settle
+        await ctx.storage_state(path=str(state_path))
+        await browser.close()
+    return {"ok": True, "storage_state": str(state_path), "method": "qr-login"}
 
 
 # ── work list (basic per-video metrics) ──────────────────────────────────

@@ -28,13 +28,20 @@ configure. Override with `--chromium <path>` / `$SCC_CHROMIUM` if needed.
 
 ## Onboarding
 
+Preferred — QR scan login. A headed browser opens; the human scans the platform's own
+QR with their phone; the session is saved automatically.
+
 ```bash
-python -m collector init --account <account>
+python -m collector init            --account <account>
+python -m collector bilibili login  --account <account>   # → credential file
+python -m collector douyin   login  --account <account>   # → storage state
 ```
 
-Then place cookies (Cookie-Editor → JSON):
+`login` needs a desktop session (headed browser). When cookies expire, re-run it.
+
+Fallback (QR rejected, or headless host) — Cookie-Editor export → JSON:
 - B站: `social/_secrets/<account>/bilibili/default.credentials.json` — `{"SESSDATA":"...","bili_jct":"...","buvid3":"..."}`
-- 抖音: `social/_secrets/<account>/douyin/default.cookies.json` — the Cookie-Editor array
+- 抖音: `social/_secrets/<account>/douyin/default.cookies.json` (then `douyin import-cookies`)
 
 ## Collecting
 
@@ -43,11 +50,9 @@ Then place cookies (Cookie-Editor → JSON):
 python -m collector bilibili probe   --account <account>
 python -m collector bilibili summary --account <account> --days 30
 
-# 抖音 — Playwright
-python -m collector douyin check-cookies  --account <account>
-python -m collector douyin import-cookies --account <account>   # → storage state, verifies login
-python -m collector douyin worklist       --account <account> --days 30
-python -m collector douyin fan-growth     --account <account>   # 粉丝增量, DOM-only
+# 抖音 — Playwright (after `douyin login`, or import-cookies fallback)
+python -m collector douyin worklist   --account <account> --days 30
+python -m collector douyin fan-growth --account <account>   # 粉丝增量, DOM-only
 ```
 
 `bilibili summary` returns daily fan increments plus per-video play/fans/**coin**/reply/likes
@@ -70,7 +75,9 @@ browser, inspect the new structure, and update that one function.
 
 - B站 direct public APIs can hit `412`/`-799`/`-352`/`-403`; the collector uses creator-center
   paths with cookies and raises (doesn't hammer) on those codes.
-- Douyin QR login from a remote/headless session is rejected — use local Cookie-Editor export.
+- Douyin QR is risk-controlled: `douyin login` runs a **headed local** browser (works where
+  headless/remote is rejected). If even the automated browser gets flagged, fall back to
+  Cookie-Editor + `import-cookies`.
 - Cookie expiry is the most common failure. `probe` / `import-cookies` fail loud; if a collect
   command returns empty or a login warning, re-export before debugging.
 - Don't store transient STS/upload/IM tokens seen in creator-center network logs.

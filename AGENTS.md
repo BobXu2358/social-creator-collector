@@ -22,24 +22,33 @@ Chromium is resolved cross-platform (see `collector/browser.py`): the default is
 Playwright's bundled browser — no hardcoded path. Override with `--chromium <path>`,
 `$SCC_CHROMIUM`, or `$SCC_CHROMIUM_CHANNEL=chrome` to use installed Chrome.
 
-## Cookie onboarding
+## Login / cookie onboarding
 
-Install Cookie-Editor and have the human export cookies as **JSON** (not Netscape text):
-https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm
+**Preferred — QR scan login.** Opens a real browser window; the human scans the
+platform's own QR with their phone; the session is saved automatically. No
+Cookie-Editor, no manual paste.
 
 ```bash
-python -m collector init --account <account>     # creates folders + example files
+python -m collector init            --account <account>   # folders + examples
+python -m collector bilibili login  --account <account>   # → credential file
+python -m collector douyin   login  --account <account>   # → storage state
 ```
 
-**Mode A — local file (preferred).** Ask the human to save the export at:
-- B站: `social/_secrets/<account>/bilibili/default.credentials.json` →
-  `{"SESSDATA":"...","bili_jct":"...","buvid3":"..."}`
-- 抖音: `social/_secrets/<account>/douyin/default.cookies.json` (Cookie-Editor JSON array)
+`login` runs a **headed** browser, so it needs a desktop session (won't work on a
+headless server, and can't run unattended in cron). When cookies expire, just
+re-run `login`. Douyin's QR is heavily risk-controlled — if the automated browser
+gets rejected, fall back to Cookie-Editor below.
 
-**Mode B — chat paste (fallback).** If the human pastes cookie JSON in chat:
-1. Keep only the needed keys — B站: `SESSDATA`,`bili_jct`,`buvid3`; 抖音: `sessionid`,`sessionid_ss`,`sid_guard`,`uid_tt`,`passport_csrf_token` (+ any `*sessionid*`/`*csrf*`/`*guard*`/`*uid*`).
-2. Write the cleaned JSON to the `_secrets` path above; `chmod 600` it.
-3. **Never echo the values back.** Reply only with the verification result (mid/nickname — not cookies).
+**Fallback — Cookie-Editor export.** Use when QR login is rejected, or on a headless
+host. Export cookies as **JSON** (not Netscape text):
+https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm
+
+- *Mode A (local file)* — save the export, then `douyin import-cookies`:
+  - B站: `social/_secrets/<account>/bilibili/default.credentials.json` → `{"SESSDATA":"...","bili_jct":"...","buvid3":"..."}`
+  - 抖音: `social/_secrets/<account>/douyin/default.cookies.json` (Cookie-Editor JSON array)
+- *Mode B (chat paste)* — if the human pastes cookie JSON in chat: keep only the needed
+  keys (B站: `SESSDATA`,`bili_jct`,`buvid3`; 抖音: `sessionid`,`sessionid_ss`,`sid_guard`,`uid_tt`,`passport_csrf_token`),
+  write to the `_secrets` path, `chmod 600`, and **never echo the values back** — reply only with the verification result.
 
 ## Commands
 
@@ -50,10 +59,12 @@ python -m collector <group> <action> --account <account> [options]
 | Command | What it does |
 |---|---|
 | `init --account X` | create folder structure + example credential files |
+| `bilibili login --account X` | QR scan login (headed browser) → credential file |
 | `bilibili probe --account X` | verify B站 login + identity (fails loud if cookie expired) |
 | `bilibili summary --account X --days 30` | fan trend + per-video play/fans/coin/reply/likes |
 | `bilibili comments --account X --bvid BVxxx` | collect top-level video comments |
 | `bilibili danmaku --account X --bvid BVxxx` | fetch danmaku + density-peak analysis |
+| `douyin login --account X` | QR scan login (headed browser) → storage state |
 | `douyin check-cookies --account X` | validate a Cookie-Editor export's structure |
 | `douyin import-cookies --account X` | cookies → Playwright storage state + verify login |
 | `douyin worklist --account X --days 30` | creator-center work list + basic metrics |
