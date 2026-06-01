@@ -24,6 +24,7 @@ from typing import Any
 
 import httpx
 
+from . import schema
 from .paths import TZ, CollectorError, output_dirs
 
 REQUIRED_FIELDS = ("SESSDATA", "bili_jct", "buvid3")
@@ -179,13 +180,14 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
             raise CollectorError("no Bilibili fan trend returned (cookie may lack creator access)")
         latest = max(datetime.fromtimestamp(x["date_key"], TZ).date() for x in trend)
         start = latest - _days(days - 1)
+        captured = datetime.now(TZ).isoformat()
         fan_rows = sorted(
             (
-                {
-                    "date": datetime.fromtimestamp(x["date_key"], TZ).date().isoformat(),
-                    "fan_inc": int(x.get("total_inc") or 0),
-                    "sub_total_inc": int(x.get("sub_total_inc") or 0),
-                }
+                schema.fan_trend_row(
+                    platform="bilibili", account=account,
+                    date=datetime.fromtimestamp(x["date_key"], TZ).date().isoformat(),
+                    fan_inc=int(x.get("total_inc") or 0), captured_at=captured,
+                )
                 for x in trend
                 if start <= datetime.fromtimestamp(x["date_key"], TZ).date() <= latest
             ),
@@ -206,30 +208,31 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
                 pub = datetime.fromtimestamp(int(it["pubtime"]), TZ)
                 if start <= pub.date() <= latest:
                     stat = it.get("real_stat") or it.get("stat") or {}
-                    videos.append({
-                        "pubtime": pub.strftime("%Y-%m-%d %H:%M"),
-                        "bvid": it.get("bvid"),
-                        "aid": it.get("aid"),
-                        "title": it.get("title"),
-                        "play": int(stat.get("play") or 0),
-                        "fans": int(stat.get("fans") or 0),
-                        "reply": int(stat.get("reply") or 0),
-                        "likes": int(stat.get("likes") or 0),
-                        "coin": int(stat.get("coin") or 0),
-                        "full_play_ratio": stat.get("full_play_ratio"),
-                    })
+                    videos.append(schema.video_row(
+                        platform="bilibili", account=account, content_id=it.get("bvid"),
+                        title=it.get("title"), published_at=pub.isoformat(), captured_at=captured,
+                        source_url=f"https://www.bilibili.com/video/{it.get('bvid')}",
+                        metrics={
+                            "plays": int(stat.get("play") or 0),
+                            "likes": int(stat.get("likes") or 0),
+                            "comments": int(stat.get("reply") or 0),
+                            "coins": int(stat.get("coin") or 0),
+                            "fans": int(stat.get("fans") or 0),
+                            "full_play_ratio": stat.get("full_play_ratio"),
+                        }))
             if datetime.fromtimestamp(int(items[-1]["pubtime"]), TZ).date() < start:
                 break
-    videos.sort(key=lambda r: r["pubtime"], reverse=True)
+    videos.sort(key=lambda r: r["published_at"] or "", reverse=True)
 
     result = {
+        "schema_version": schema.SCHEMA_VERSION,
         "account": account,
         "platform": "bilibili",
         "source": "Bilibili creator-center APIs",
         "range": {"start": start.isoformat(), "end": latest.isoformat(), "days": days},
-        "captured_at": datetime.now(TZ).isoformat(),
+        "captured_at": captured,
         "fan_total": sum(r["fan_inc"] for r in fan_rows),
-        "fan_rows": fan_rows,
+        "fan_trend": fan_rows,
         "videos": videos,
     }
     raw, processed = output_dirs(ws, account, "bilibili")
@@ -252,10 +255,11 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
         "",
     ]
     for v in videos:
+        m = v["metrics"]
         lines.append(
-            f"- {v['pubtime']} `{v['bvid']}` {v['title']} — "
-            f"play {v['play']:,}, fans {v['fans']:,}, coin {v['coin']:,}, "
-            f"reply {v['reply']:,}, likes {v['likes']:,}"
+            f"- {(v['published_at'] or '')[:16].replace('T', ' ')} `{v['content_id']}` {v['title']} — "
+            f"play {m.get('plays', 0):,}, fans {m.get('fans', 0):,}, coin {m.get('coins', 0):,}, "
+            f"reply {m.get('comments', 0):,}, likes {m.get('likes', 0):,}"
         )
     mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"ok": True, "json": str(jp), "markdown": str(mp),

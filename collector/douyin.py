@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from . import schema
 from .browser import BUNDLED_HINT, launch_kwargs
 from .paths import TZ, CollectorError, output_dirs
 
@@ -187,6 +188,28 @@ def _ts_to_str(ts: Any) -> str:
         return ""
 
 
+def _iso(ts: Any) -> str | None:
+    try:
+        t = int(ts)
+        t = t // 1000 if t > 10_000_000_000 else t
+        return datetime.fromtimestamp(t, TZ).isoformat()
+    except Exception:
+        return None
+
+
+def _aweme_canonical(n: dict[str, Any], account: str, captured_at: str) -> dict[str, Any]:
+    """Map an internal normalized aweme to a canonical video row."""
+    return schema.video_row(
+        platform="douyin", account=account, content_id=n.get("aweme_id"),
+        title=n.get("title"), published_at=_iso(n.get("create_time")),
+        captured_at=captured_at, source_url=n.get("url"),
+        metrics={
+            "plays": n.get("play"), "likes": n.get("like"),
+            "comments": n.get("comment"), "shares": n.get("share"),
+            "collects": n.get("collect"),
+        })
+
+
 def _normalize_aweme(a: dict[str, Any]) -> dict[str, Any]:
     stat = a.get("Statistics") or a.get("statistics") or {}
     item = {
@@ -263,34 +286,41 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
     rows = [n for n in items
             if cutoff is None or _safe_date(n.get("create_time")) >= cutoff] if cutoff else items
 
+    captured = datetime.now(TZ).isoformat()
+    items_c = [_aweme_canonical(n, account, captured) for n in items]
+    rows_c = [_aweme_canonical(n, account, captured) for n in rows]
+
     raw, processed = output_dirs(ws, account, "douyin")
     stamp = _stamp()
     result = {
+        "schema_version": schema.SCHEMA_VERSION,
         "account": account, "platform": "douyin",
         "source": "Douyin creator center /janus/douyin/creator/pc/work_list",
-        "captured_at": datetime.now(TZ).isoformat(),
+        "captured_at": captured,
         "range": {"days": days, "cutoff": cutoff.isoformat() if cutoff else None},
-        "page_count": len(pages_meta), "item_count": len(items),
-        "items": items, "selected_items": rows, "pages": pages_meta,
+        "page_count": len(pages_meta), "item_count": len(items_c),
+        "items": items_c, "selected_items": rows_c, "pages": pages_meta,
     }
-    if not items:
-        result["warning"] = "no works returned — storage state may be expired; re-run import-cookies"
+    if not items_c:
+        result["warning"] = "no works returned — storage state may be expired; re-run login/import-cookies"
     jp = raw / f"douyin-worklist-{days or 'all'}d-{stamp}.json"
     mp = processed / f"douyin-worklist-{days or 'all'}d-{stamp}.md"
     jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     lines = [f"# {account} Douyin worklist ({days or 'all'} days)", "",
-             f"Captured at: {result['captured_at']}",
-             f"Items: {len(items)}; selected: {len(rows)}", "",
+             f"Captured at: {captured}",
+             f"Items: {len(items_c)}; selected: {len(rows_c)}", "",
              "| Time | Work ID | Title | Play | Like | Comment | Share | Collect |",
              "|---|---|---|---:|---:|---:|---:|---:|"]
-    for it in rows:
-        title = (it.get("title") or "").replace("|", "/").replace("\n", " ")[:80]
-        lines.append(f"| {it.get('create_time_str', '')} | {it.get('aweme_id', '')} | {title} | "
-                     f"{_fmt(it.get('play'))} | {_fmt(it.get('like'))} | {_fmt(it.get('comment'))} | "
-                     f"{_fmt(it.get('share'))} | {_fmt(it.get('collect'))} |")
+    for r in rows_c:
+        m = r["metrics"]
+        title = (r.get("title") or "").replace("|", "/").replace("\n", " ")[:80]
+        pub = (r.get("published_at") or "")[:19].replace("T", " ")
+        lines.append(f"| {pub} | {r.get('content_id', '')} | {title} | "
+                     f"{_fmt(m.get('plays'))} | {_fmt(m.get('likes'))} | {_fmt(m.get('comments'))} | "
+                     f"{_fmt(m.get('shares'))} | {_fmt(m.get('collects'))} |")
     mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"ok": True, "json": str(jp), "markdown": str(mp),
-            "items": len(items), "selected": len(rows)}
+            "items": len(items_c), "selected": len(rows_c)}
 
 
 def _safe_date(ts: Any):
@@ -395,19 +425,27 @@ async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str
         table = await page.evaluate(_EXTRACT_TABLE_JS)
         await browser.close()
 
-    rows = _parse_fan_table(table)
-    if not rows:
+    parsed = _parse_fan_table(table)
+    if not parsed:
         raise CollectorError(
             f"'{_FAN_COL}' column not found in 投稿列表 — Douyin changed the table; "
             "re-inspect the DOM and update collector/douyin.py."
         )
 
+    captured = datetime.now(TZ).isoformat()
+    # No aweme_id in the 投稿列表 DOM → content_id is null; join by (title, published).
+    rows = [schema.video_row(
+        platform="douyin", account=account, content_id=None,
+        title=r["title"], published_at=r["published"] or None, captured_at=captured,
+        metrics={"fans": r["fan_growth"]}) for r in parsed]
+
     raw, processed = output_dirs(ws, account, "douyin")
     stamp = _stamp()
     result = {
+        "schema_version": schema.SCHEMA_VERSION,
         "account": account, "platform": "douyin", "metric": "fan_growth (粉丝增量)",
         "source": "Douyin creator data-center 投稿列表 DOM",
-        "captured_at": datetime.now(TZ).isoformat(),
+        "captured_at": captured,
         "scroll_rounds": scrolls, "row_count": len(rows), "rows": rows,
         "note": "bounded by the 投稿列表 发布时间 filter; widen it for older history",
     }
@@ -415,11 +453,11 @@ async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str
     mp = processed / f"douyin-fan-growth-{stamp}.md"
     jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     lines = [f"# {account} Douyin per-video fan growth", "",
-             f"Captured at: {result['captured_at']}  ·  rows: {len(rows)}", "",
+             f"Captured at: {captured}  ·  rows: {len(rows)}", "",
              "| Published | Title | 粉丝增量 |", "|---|---|---:|"]
     for r in rows:
-        title = r["title"].replace("|", "/")[:80]
-        lines.append(f"| {r['published']} | {title} | {_fmt(r['fan_growth'])} |")
+        title = (r["title"] or "").replace("|", "/")[:80]
+        lines.append(f"| {r['published_at'] or ''} | {title} | {_fmt(r['metrics'].get('fans'))} |")
     mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"ok": True, "json": str(jp), "markdown": str(mp), "rows": len(rows)}
 

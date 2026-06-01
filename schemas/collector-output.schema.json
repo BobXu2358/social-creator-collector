@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Collector canonical rows",
+  "description": "The cross-platform output contract. schema_version is bumped on breaking changes; see MAINTAINING.md. Built by collector/schema.py.",
+  "$defs": {
+    "video_row": {
+      "type": "object",
+      "required": ["schema_version", "platform", "account", "content_id", "metrics"],
+      "properties": {
+        "schema_version": { "type": "string" },
+        "platform": { "type": "string", "enum": ["bilibili", "douyin"] },
+        "account": { "type": "string", "description": "namespace, not the platform account id" },
+        "content_id": {
+          "type": ["string", "null"],
+          "description": "bvid / aweme_id. null for Douyin fan-growth (DOM has no id) — join by title+published_at."
+        },
+        "title": { "type": ["string", "null"] },
+        "published_at": {
+          "type": ["string", "null"],
+          "description": "ISO8601 where available; Douyin fan-growth rows are a minute-precision local 'YYYY-MM-DD HH:MM' string (DOM-sourced)."
+        },
+        "captured_at": { "type": "string" },
+        "source_url": { "type": ["string", "null"] },
+        "metrics": {
+          "type": "object",
+          "description": "Only keys that apply are present (absent = N/A). Standard keys below; platforms may add extras (e.g. full_play_ratio).",
+          "properties": {
+            "plays": { "type": "integer" },
+            "likes": { "type": "integer" },
+            "comments": { "type": "integer" },
+            "shares": { "type": "integer" },
+            "collects": { "type": "integer" },
+            "coins": { "type": "integer", "description": "Bilibili only" },
+            "fans": {
+              "type": "integer",
+              "description": "per-video fan delta. bilibili: cumulative attributed fans; douyin: 粉丝增量 within the publish-time window. Definitions differ — don't compare blindly across platforms."
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "fan_trend_row": {
+      "type": "object",
+      "required": ["schema_version", "platform", "account", "date", "fan_inc"],
+      "properties": {
+        "schema_version": { "type": "string" },
+        "platform": { "type": "string", "enum": ["bilibili", "douyin"] },
+        "account": { "type": "string" },
+        "date": { "type": "string", "description": "YYYY-MM-DD" },
+        "fan_inc": { "type": "integer", "description": "net fan change that day (涨粉)" },
+        "captured_at": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

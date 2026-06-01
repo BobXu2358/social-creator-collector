@@ -78,6 +78,15 @@ python -m collector <group> <action> --account <account> [options]
 Every command prints one JSON result line. Outputs land under
 `social/<account>/<platform>/raw/*.json` and `processed/*.md`.
 
+## Output schema
+
+Per-video and daily-fan-trend data use a canonical, versioned row shape
+(`collector/schema.py`, documented in `schemas/collector-output.schema.json`), so a
+consumer sees the same field names across platforms — `metrics.plays/likes/comments/
+shares/collects/coins/fans`, plus `content_id`, `published_at`, `captured_at`. Every
+data output carries `schema_version`; it bumps only on breaking changes. Build
+downstream tools against this shape, not against one command's incidental JSON.
+
 ## What's worth knowing (so you don't relearn the traps)
 
 - **Douyin per-video fan growth has no API** — it only exists in the 投稿列表 table DOM.

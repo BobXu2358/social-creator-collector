@@ -12,7 +12,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from collector import bilibili, douyin
+from collector import bilibili, douyin, schema
 from collector.cli import main
 from collector.paths import CollectorError, output_dirs, safe_name, secret_dir, workspace_root
 
@@ -128,6 +128,36 @@ class PureParsers(unittest.TestCase):
 
     def test_analyze_danmaku_empty(self):
         self.assertEqual(bilibili.analyze_danmaku([], title="t")["total_danmaku"], 0)
+
+
+class CanonicalSchema(unittest.TestCase):
+    def test_video_row_shape_and_null_metrics_dropped(self):
+        row = schema.video_row(
+            platform="bilibili", account="xgame", content_id="BV1xx", title="t",
+            published_at="2026-05-29T17:45:00+08:00", captured_at="2026-06-01T00:00:00+08:00",
+            source_url="u", metrics={"plays": 10, "likes": 2, "shares": None, "fans": 0})
+        self.assertEqual(row["schema_version"], schema.SCHEMA_VERSION)
+        self.assertEqual(row["content_id"], "BV1xx")
+        self.assertEqual(row["metrics"], {"plays": 10, "likes": 2, "fans": 0})  # None dropped, 0 kept
+        self.assertNotIn("shares", row["metrics"])
+        for k in ("platform", "account", "title", "published_at", "captured_at", "source_url"):
+            self.assertIn(k, row)
+
+    def test_video_row_null_content_id(self):
+        row = schema.video_row(platform="douyin", account="xgame", content_id=None, title="t",
+                               published_at=None, captured_at="c", metrics={"fans": 5})
+        self.assertIsNone(row["content_id"])
+
+    def test_video_row_stringifies_numeric_content_id(self):
+        self.assertEqual(schema.video_row(platform="douyin", account="x", content_id=7645247646638066994,
+                                          title=None, published_at=None, captured_at="c",
+                                          metrics={})["content_id"], "7645247646638066994")
+
+    def test_fan_trend_row_shape(self):
+        row = schema.fan_trend_row(platform="bilibili", account="xgame", date="2026-05-30",
+                                   fan_inc=123, captured_at="c")
+        self.assertEqual((row["platform"], row["date"], row["fan_inc"]), ("bilibili", "2026-05-30", 123))
+        self.assertEqual(row["schema_version"], schema.SCHEMA_VERSION)
 
 
 if __name__ == "__main__":
