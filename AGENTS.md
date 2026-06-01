@@ -22,6 +22,29 @@ python -m playwright install chromium    # only needed for the Douyin commands
 `python -m collector`). Examples below use `python -m collector` so they work
 without installing.
 
+### On Windows (PowerShell)
+
+Same package — three Windows-specific gotchas, worth knowing since a coding agent may be
+driving this on a colleague's Windows machine:
+
+- **Use a real Python, not the Store stub.** A bare `python` on Windows is usually the
+  Microsoft Store alias: it prints nothing and exits non-zero (9009), or pops the Store.
+  Install CPython (`winget install Python.Python.3.12`, or python.org) and confirm with
+  `py -V` before anything else.
+- **venv + install, PowerShell syntax** (the bash `source .../activate` line won't work):
+  ```powershell
+  py -3 -m venv .venv
+  .\.venv\Scripts\Activate.ps1
+  pip install -e .
+  python -m playwright install chromium   # only for the Douyin commands
+  ```
+- **`tzdata` is pulled in automatically** on Windows (the package depends on it). Without a tz
+  database, `ZoneInfo("Asia/Shanghai")` makes every command fail at import — so don't strip it.
+
+Bilibili is pure HTTP, so a **B站-only** setup needs just Python + `pip install` — no
+`playwright install chromium`, no browser. Chromium (and a desktop session for the headed QR
+login) is only required for the Douyin commands.
+
 ## Staying current
 
 The tool lives upstream — fixes (especially when Douyin changes its DOM) ship there, not in
