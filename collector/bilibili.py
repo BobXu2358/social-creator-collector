@@ -19,7 +19,7 @@ import time
 import urllib.parse
 import zlib
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -147,6 +147,8 @@ async def _login_async(credential_path: Path, chromium: str | None, timeout_s: i
             await browser.close()
 
     out = {k: creds.get(k, "") for k in REQUIRED_FIELDS}
+    if creds.get("DedeUserID"):
+        out["DedeUserID"] = creds["DedeUserID"]  # platform uid — handy for consumers, not required
     missing = [k for k in REQUIRED_FIELDS if not out[k]]
     if missing:
         raise CollectorError(f"login succeeded but missing cookies {missing} — try again")
@@ -353,7 +355,7 @@ def comments(
     jp = raw / f"bilibili-comments-{bvid}-{stamp}.json"
     result = {
         "account": account, "platform": "bilibili", "bvid": bvid, "aid": aid,
-        "collected_at": datetime.now(timezone.utc).isoformat(),
+        "collected_at": datetime.now(TZ).isoformat(),
         "comment_count": len(rows),
         "comments": sorted(rows, key=lambda r: -(r.get("like") or 0)),
     }
@@ -516,7 +518,7 @@ def danmaku(
             mp = processed / f"bilibili-danmaku-{target_cid}-{stamp}.md"
             jp.write_text(json.dumps(
                 {"cid": target_cid, "title": part_title, "count": len(dms),
-                 "fetched_at": datetime.now(timezone.utc).isoformat(),
+                 "fetched_at": datetime.now(TZ).isoformat(),
                  "danmaku": dms, "analysis": analysis},
                 ensure_ascii=False, indent=2), encoding="utf-8")
             mp.write_text(render_danmaku_md(analysis), encoding="utf-8")

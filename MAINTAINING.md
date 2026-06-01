@@ -26,7 +26,8 @@ pip install "git+https://github.com/BobXu2358/social-creator-collector@v2.1.0"
 ```
 
 To ship a change:
-1. Branch → change → `python -m unittest tests.test_collector` (offline tests must pass).
+1. Branch → change → `pip install -e ".[dev]" && python -m unittest tests.test_collector`
+   (offline tests must pass; CI runs them on every PR across Linux + Windows).
 2. PR → review → merge to `main`.
 3. **Tag a release**: `git tag v2.1.x && git push --tags`. Without a tag there's nothing to pin.
 4. Consumers bump their pin and re-install. (After merging the current PR, tag `v2.1.0`.)

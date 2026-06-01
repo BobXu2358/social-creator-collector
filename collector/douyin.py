@@ -17,7 +17,7 @@ import json
 import re
 import sys
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -566,7 +566,7 @@ async def _comments(ws, account, aweme_id, state_path, max_pages, chromium) -> d
     stamp = _stamp()
     result = {
         "account": account, "platform": "douyin", "aweme_id": aweme_id,
-        "collected_at": datetime.now(timezone.utc).isoformat(),
+        "collected_at": datetime.now(TZ).isoformat(),
         "comment_count": len(collected), "api_pages_intercepted": pages_seen,
         "comments": sorted(collected.values(), key=lambda c: -(c.get("digg_count") or 0)),
     }

@@ -92,7 +92,9 @@ python -m collector <group> <action> --account <account> [options]
 | `douyin comments --account X --aweme-id ID` | collect video comments |
 
 Every command prints one JSON result line. Outputs land under
-`social/<account>/<platform>/raw/*.json` and `processed/*.md`.
+`social/<account>/<platform>/raw/*.json` and `processed/*.md`. On an unexpected error
+the CLI prints a one-line `ERROR: …` and exits non-zero; pass `--debug` to any command
+for the full traceback.
 
 ## Output schema
 
