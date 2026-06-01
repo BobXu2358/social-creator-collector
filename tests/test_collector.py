@@ -34,9 +34,10 @@ class PathIsolation(unittest.TestCase):
             ws = workspace_root(tmp)
             sd = secret_dir(ws, "xgame", "douyin")
             raw, processed = output_dirs(ws, "xgame", "bilibili")
-            self.assertTrue(str(sd).endswith("/social/_secrets/xgame/douyin"))
-            self.assertIn("/social/xgame/bilibili/raw", str(raw))
-            self.assertIn("/social/xgame/bilibili/processed", str(processed))
+            # as_posix() so the assertions hold on Windows too (str(Path) uses '\').
+            self.assertTrue(sd.as_posix().endswith("/social/_secrets/xgame/douyin"))
+            self.assertIn("/social/xgame/bilibili/raw", raw.as_posix())
+            self.assertIn("/social/xgame/bilibili/processed", processed.as_posix())
             self.assertNotIn("chapingjun", str(sd) + str(raw))
             self.assertTrue(raw.is_dir() and processed.is_dir())
 

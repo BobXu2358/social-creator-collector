@@ -16,6 +16,7 @@ import asyncio
 import json
 import re
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,20 @@ async def _launch(p, chromium: str | None, *, headless: bool = True):
         return await p.chromium.launch(headless=headless, **launch_kwargs(chromium))
     except Exception as exc:  # bundled browser missing → actionable message
         raise CollectorError(f"{exc}\n\n{BUNDLED_HINT}") from exc
+
+
+@asynccontextmanager
+async def _browser(p, chromium: str | None, *, headless: bool = True):
+    """Launch a browser and guarantee it's closed even if collection raises midway.
+
+    Without this, any exception between launch and the trailing ``browser.close()``
+    leaked the browser process (and, for headed login, a stranded window).
+    """
+    browser = await _launch(p, chromium, headless=headless)
+    try:
+        yield browser
+    finally:
+        await browser.close()
 
 
 def _stamp() -> str:
@@ -101,8 +116,7 @@ async def _import_cookies(cookies_path, state_path, chromium, nickname, douyin_i
     cookies = _load_cookie_list(cookies_path)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     async_playwright = _import_playwright()
-    async with async_playwright() as p:
-        browser = await _launch(p, chromium)
+    async with async_playwright() as p, _browser(p, chromium) as browser:
         ctx = await browser.new_context(**_CTX)
         await ctx.add_cookies([_normalize_cookie(c) for c in cookies])
         page = await ctx.new_page()
@@ -111,7 +125,6 @@ async def _import_cookies(cookies_path, state_path, chromium, nickname, douyin_i
         await page.wait_for_timeout(8000)
         body = (await page.locator("body").inner_text(timeout=5000))[:3000]
         await ctx.storage_state(path=str(state_path))
-        await browser.close()
     on_login_page = any(x in body for x in ("扫码登录", "验证码登录", "登录/注册"))
     if on_login_page:
         raise CollectorError(
@@ -143,8 +156,7 @@ async def _login(state_path, chromium, timeout_s) -> dict[str, Any]:
     """
     state_path.parent.mkdir(parents=True, exist_ok=True)
     async_playwright = _import_playwright()
-    async with async_playwright() as p:
-        browser = await _launch(p, chromium, headless=False)
+    async with async_playwright() as p, _browser(p, chromium, headless=False) as browser:
         ctx = await browser.new_context(**_CTX)
         page = await ctx.new_page()
         await page.goto("https://creator.douyin.com/", wait_until="domcontentloaded", timeout=60000)
@@ -159,14 +171,12 @@ async def _login(state_path, chromium, timeout_s) -> dict[str, Any]:
             await page.wait_for_timeout(2000)
             waited += 2000
         if not logged_in:
-            await browser.close()
             raise CollectorError(
                 "Douyin QR login timed out (no sessionid). Retry, or fall back to "
                 "Cookie-Editor export + import-cookies."
             )
         await page.wait_for_timeout(2000)  # let creator home settle
         await ctx.storage_state(path=str(state_path))
-        await browser.close()
     return {"ok": True, "storage_state": str(state_path), "method": "qr-login"}
 
 
@@ -242,8 +252,7 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
     async_playwright = _import_playwright()
     all_items: list[dict[str, Any]] = []
     pages_meta: list[dict[str, Any]] = []
-    async with async_playwright() as p:
-        browser = await _launch(p, chromium)
+    async with async_playwright() as p, _browser(p, chromium) as browser:
         ctx = await browser.new_context(storage_state=str(state_path), **_CTX)
         page = await ctx.new_page()
         await page.goto("https://creator.douyin.com/creator-micro/content/manage",
@@ -270,7 +279,6 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
                 break
             cursor = nxt
             await page.wait_for_timeout(1000)
-        await browser.close()
 
     seen: set[Any] = set()
     items: list[dict[str, Any]] = []
@@ -393,8 +401,7 @@ async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str
     if not state_path.exists():
         raise CollectorError(f"missing Douyin storage state; run login/import-cookies first: {state_path}")
     async_playwright = _import_playwright()
-    async with async_playwright() as p:
-        browser = await _launch(p, chromium)
+    async with async_playwright() as p, _browser(p, chromium) as browser:
         ctx = await browser.new_context(storage_state=str(state_path), **_CTX)
         page = await ctx.new_page()
         await page.goto("https://creator.douyin.com/creator-micro/data-center/content",
@@ -425,7 +432,6 @@ async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str
             await page.wait_for_timeout(1500)
             scrolls += 1
         table = await page.evaluate(_EXTRACT_TABLE_JS)
-        await browser.close()
 
     parsed = _parse_fan_table(table)
     if not parsed:
@@ -489,8 +495,7 @@ async def _comments(ws, account, aweme_id, state_path, max_pages, chromium) -> d
     async_playwright = _import_playwright()
     collected: dict[Any, dict[str, Any]] = {}
     pages_seen = 0
-    async with async_playwright() as p:
-        browser = await _launch(p, chromium)
+    async with async_playwright() as p, _browser(p, chromium) as browser:
         ctx = await browser.new_context(storage_state=str(state_path), **_CTX)
         page = await ctx.new_page()
 
@@ -545,7 +550,6 @@ async def _comments(ws, account, aweme_id, state_path, max_pages, chromium) -> d
                     break
             else:
                 stable, last = 0, len(collected)
-        await browser.close()
 
     raw, processed = output_dirs(ws, account, "douyin")
     stamp = _stamp()

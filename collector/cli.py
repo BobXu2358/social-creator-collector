@@ -14,6 +14,24 @@ from . import __version__, bilibili, douyin
 from .paths import CollectorError, output_dirs, safe_name, secret_dir, workspace_root
 
 
+def _bounded_int(min_v: int, max_v: int | None = None):
+    """argparse ``type`` that rejects out-of-range ints up front.
+
+    Stops a stray ``--max-pages 999999`` (or a negative delay) from turning a
+    read-only collect into a risk-control magnet before a single request goes out.
+    """
+    def _parse(s: str) -> int:
+        try:
+            v = int(s)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"expected an integer, got {s!r}")
+        if v < min_v or (max_v is not None and v > max_v):
+            hi = max_v if max_v is not None else "∞"
+            raise argparse.ArgumentTypeError(f"must be in [{min_v}, {hi}], got {v}")
+        return v
+    return _parse
+
+
 # ── path resolution ──────────────────────────────────────────────────────
 
 def _ws(args) -> Path:
@@ -82,6 +100,8 @@ def _build_parser() -> argparse.ArgumentParser:
     common.add_argument("--workspace", default="", help="workspace root (default: cwd)")
     common.add_argument("--account", required=True, help="account/business namespace, e.g. xgame")
     common.add_argument("--profile", default="default", help="credential profile name")
+    common.add_argument("--debug", action="store_true",
+                        help="on unexpected error, print a full traceback instead of one-line ERROR")
 
     def _chromium(parser):
         parser.add_argument("--chromium", default="",
@@ -98,7 +118,7 @@ def _build_parser() -> argparse.ArgumentParser:
     b_login = bili.add_parser("login", parents=[common],
                               help="QR scan login (headed browser) → credential file")
     b_login.add_argument("--credential", default="")
-    b_login.add_argument("--timeout", type=int, default=180, dest="timeout_s")
+    b_login.add_argument("--timeout", type=_bounded_int(1, 3600), default=180, dest="timeout_s")
     _chromium(b_login)
     b_login.set_defaults(func=lambda a: bilibili.login(
         ws=_ws(a), account=a.account, credential_path=_bili_credential(a),
@@ -111,7 +131,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     b_sum = bili.add_parser("summary", parents=[common], help="fan trend + per-video metrics")
     b_sum.add_argument("--credential", default="")
-    b_sum.add_argument("--days", type=int, default=30)
+    b_sum.add_argument("--days", type=_bounded_int(1, 3650), default=30)
     b_sum.set_defaults(func=lambda a: bilibili.summary(
         ws=_ws(a), account=a.account, credential_path=_bili_credential(a), days=a.days))
 
@@ -121,8 +141,8 @@ def _build_parser() -> argparse.ArgumentParser:
     src.add_argument("--bvid")
     src.add_argument("--aid", type=int)
     b_cmt.add_argument("--sessdata", default="")
-    b_cmt.add_argument("--max-pages", type=int, default=10, dest="max_pages")
-    b_cmt.add_argument("--delay-ms", type=int, default=600, dest="delay_ms")
+    b_cmt.add_argument("--max-pages", type=_bounded_int(1, 500), default=10, dest="max_pages")
+    b_cmt.add_argument("--delay-ms", type=_bounded_int(0, 60000), default=600, dest="delay_ms")
     b_cmt.set_defaults(func=lambda a: bilibili.comments(
         ws=_ws(a), account=a.account, bvid=a.bvid, aid=a.aid, sessdata=_sessdata(a),
         max_pages=a.max_pages, delay_ms=a.delay_ms))
@@ -131,8 +151,8 @@ def _build_parser() -> argparse.ArgumentParser:
     dm_src = b_dm.add_mutually_exclusive_group(required=True)
     dm_src.add_argument("--bvid")
     dm_src.add_argument("--cid", type=int)
-    b_dm.add_argument("--bucket-s", type=int, default=10, dest="bucket_s")
-    b_dm.add_argument("--peak-n", type=int, default=5, dest="peak_n")
+    b_dm.add_argument("--bucket-s", type=_bounded_int(1, 3600), default=10, dest="bucket_s")
+    b_dm.add_argument("--peak-n", type=_bounded_int(1, 100), default=5, dest="peak_n")
     b_dm.add_argument("--peak-method", choices=["topn", "zscore"], default="topn", dest="peak_method")
     b_dm.add_argument("--no-filter", action="store_true", dest="no_filter",
                       help="keep subtitle danmaku (pool=1)")
@@ -147,7 +167,7 @@ def _build_parser() -> argparse.ArgumentParser:
     d_login = dy.add_parser("login", parents=[common],
                             help="QR scan login (headed browser) → storage state")
     d_login.add_argument("--storage-state", default="", dest="storage_state")
-    d_login.add_argument("--timeout", type=int, default=180, dest="timeout_s")
+    d_login.add_argument("--timeout", type=_bounded_int(1, 3600), default=180, dest="timeout_s")
     _chromium(d_login)
     d_login.set_defaults(func=lambda a: douyin.login(
         ws=_ws(a), account=a.account, state_path=_douyin_state(a),
@@ -169,8 +189,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     d_wl = dy.add_parser("worklist", parents=[common], help="creator-center work list")
     d_wl.add_argument("--storage-state", default="", dest="storage_state")
-    d_wl.add_argument("--days", type=int, default=30)
-    d_wl.add_argument("--max-pages", type=int, default=20, dest="max_pages")
+    d_wl.add_argument("--days", type=_bounded_int(0, 3650), default=30)
+    d_wl.add_argument("--max-pages", type=_bounded_int(1, 500), default=20, dest="max_pages")
     _chromium(d_wl)
     d_wl.set_defaults(func=lambda a: douyin.worklist(
         ws=_ws(a), account=a.account, state_path=_douyin_state(a), days=a.days,
@@ -179,7 +199,7 @@ def _build_parser() -> argparse.ArgumentParser:
     d_fg = dy.add_parser("fan-growth", parents=[common],
                          help="per-video fan growth (粉丝增量) from DOM")
     d_fg.add_argument("--storage-state", default="", dest="storage_state")
-    d_fg.add_argument("--max-scroll", type=int, default=40, dest="max_scroll",
+    d_fg.add_argument("--max-scroll", type=_bounded_int(1, 500), default=40, dest="max_scroll",
                       help="max scroll rounds to lazy-load the 投稿列表")
     _chromium(d_fg)
     d_fg.set_defaults(func=lambda a: douyin.fan_growth(
@@ -189,7 +209,7 @@ def _build_parser() -> argparse.ArgumentParser:
     d_cmt = dy.add_parser("comments", parents=[common], help="collect video comments")
     d_cmt.add_argument("--storage-state", default="", dest="storage_state")
     d_cmt.add_argument("--aweme-id", required=True, dest="aweme_id")
-    d_cmt.add_argument("--max-pages", type=int, default=20, dest="max_pages")
+    d_cmt.add_argument("--max-pages", type=_bounded_int(1, 500), default=20, dest="max_pages")
     _chromium(d_cmt)
     d_cmt.set_defaults(func=lambda a: douyin.comments(
         ws=_ws(a), account=a.account, aweme_id=a.aweme_id, state_path=_douyin_state(a),
@@ -204,6 +224,12 @@ def main(argv: list[str] | None = None) -> int:
         result = args.func(args)
     except CollectorError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # last-resort guard: never dump a raw traceback at users
+        if getattr(args, "debug", False):
+            raise
+        print(f"ERROR: unexpected {type(exc).__name__}: {exc}", file=sys.stderr)
+        print("       re-run with --debug for the full traceback", file=sys.stderr)
         return 2
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
