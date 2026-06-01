@@ -69,6 +69,15 @@ def _stamp() -> str:
     return datetime.now(TZ).strftime("%Y%m%d-%H%M%S")
 
 
+def _chmod_600(path: Path) -> None:
+    """Best-effort lock down a secret file (storage state holds session cookies).
+    Mirrors what Bilibili login does for its credential file; noop on Windows."""
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
 # ── cookies ──────────────────────────────────────────────────────────────
 
 def _normalize_cookie(c: dict[str, Any]) -> dict[str, Any]:
@@ -125,6 +134,7 @@ async def _import_cookies(cookies_path, state_path, chromium, nickname, douyin_i
         await page.wait_for_timeout(8000)
         body = (await page.locator("body").inner_text(timeout=5000))[:3000]
         await ctx.storage_state(path=str(state_path))
+    _chmod_600(state_path)
     on_login_page = any(x in body for x in ("扫码登录", "验证码登录", "登录/注册"))
     if on_login_page:
         raise CollectorError(
@@ -177,6 +187,7 @@ async def _login(state_path, chromium, timeout_s) -> dict[str, Any]:
             )
         await page.wait_for_timeout(2000)  # let creator home settle
         await ctx.storage_state(path=str(state_path))
+    _chmod_600(state_path)
     return {"ok": True, "storage_state": str(state_path), "method": "qr-login"}
 
 

@@ -16,6 +16,11 @@ dependencies = [
     "tzdata; platform_system == 'Windows'",
 ]
 
+# Dev/test extras. The offline suite runs on the stdlib `unittest`; `jsonschema`
+# powers the schema-conformance test. Install with: pip install -e ".[dev]"
+[project.optional-dependencies]
+dev = ["jsonschema>=4.18"]
+
 # Installs a `collector` command on PATH (same as `python -m collector`).
 [project.scripts]
 collector = "collector.cli:main"
