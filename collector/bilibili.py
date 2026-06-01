@@ -118,31 +118,32 @@ async def _login_async(credential_path: Path, chromium: str | None, timeout_s: i
             browser = await p.chromium.launch(headless=False, **launch_kwargs(chromium))
         except Exception as exc:
             raise CollectorError(f"{exc}\n\n{BUNDLED_HINT}") from exc
-        ctx = await browser.new_context()
-        page = await ctx.new_page()
-        await page.goto("https://passport.bilibili.com/login", wait_until="domcontentloaded", timeout=60000)
-        print("B站：浏览器窗口已打开，请用哔哩哔哩 App 扫码登录…", file=sys.stderr)
-        creds: dict[str, str] = {}
-        waited = 0
-        while waited < timeout_s * 1000:
-            jar = {c["name"]: c["value"] for c in await ctx.cookies()}
-            if jar.get("SESSDATA") and jar.get("bili_jct"):
-                creds = jar
-                break
-            await page.wait_for_timeout(2000)
-            waited += 2000
-        if not creds:
+        try:
+            ctx = await browser.new_context()
+            page = await ctx.new_page()
+            await page.goto("https://passport.bilibili.com/login", wait_until="domcontentloaded", timeout=60000)
+            print("B站：浏览器窗口已打开，请用哔哩哔哩 App 扫码登录…", file=sys.stderr)
+            creds: dict[str, str] = {}
+            waited = 0
+            while waited < timeout_s * 1000:
+                jar = {c["name"]: c["value"] for c in await ctx.cookies()}
+                if jar.get("SESSDATA") and jar.get("bili_jct"):
+                    creds = jar
+                    break
+                await page.wait_for_timeout(2000)
+                waited += 2000
+            if not creds:
+                raise CollectorError(
+                    "Bilibili QR login timed out (no SESSDATA). Retry, or fall back to a "
+                    "local credential file."
+                )
+            if not creds.get("buvid3"):
+                await page.goto("https://www.bilibili.com/", wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(2000)
+                creds = {c["name"]: c["value"] for c in await ctx.cookies()}
+            mid = creds.get("DedeUserID")
+        finally:
             await browser.close()
-            raise CollectorError(
-                "Bilibili QR login timed out (no SESSDATA). Retry, or fall back to a "
-                "local credential file."
-            )
-        if not creds.get("buvid3"):
-            await page.goto("https://www.bilibili.com/", wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(2000)
-            creds = {c["name"]: c["value"] for c in await ctx.cookies()}
-        mid = creds.get("DedeUserID")
-        await browser.close()
 
     out = {k: creds.get(k, "") for k in REQUIRED_FIELDS}
     missing = [k for k in REQUIRED_FIELDS if not out[k]]
