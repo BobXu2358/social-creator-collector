@@ -1,37 +1,58 @@
 # Social Creator Collector
 
-为 AI agent(Claude Code、Codex、Cursor、OpenClaw 等)提供的只读 Bilibili & Douyin 创作中心数据工具包。
+只读的 Bilibili & 抖音创作者数据采集工具。一个 CLI 覆盖两个平台，专为 AI agent（Claude Code、Codex、Cursor 等）驱动设计，也可手动使用。
 
-## Quick Start(给人类看的)
+## 它能采什么
 
-告诉你的 agent:
+- **B站**（纯 HTTP）：登录校验、涨粉趋势 + 单稿数据（播放/涨粉/投币/评论/点赞）、视频评论、弹幕峰值分析。
+- **抖音**（无头浏览器）：导入 cookie、作品列表、**单稿粉丝增量**（接口拿不到，从投稿列表 DOM 提取）、视频评论。
 
-> 去 https://github.com/BobXu2358/social-creator-collector,读 AGENTS.md,帮我把这个内容创作者数据采集器配置好。
+两个平台的数据路径不同是有原因的：B站三个 cookie 拼成请求头就够了，抖音的登录态和 `a-bogus` 签名只能在真浏览器里生成，所以必须起 Playwright。
 
-你的 agent 会:
+## 快速上手（给人看）
 
-1. Clone 此 repo
-2. 安装 Python 依赖
-3. 引导你用 Cookie-Editor 导出 cookies
-4. 采集只读的内容创作者数据
+告诉你的 agent：
 
-## 仓库内容
+> 去 https://github.com/BobXu2358/social-creator-collector ，读 AGENTS.md，帮我把这个采集器配好。
 
-| 文件 | 读取者 |
-|---|---|
-| `AGENTS.md` | 你的 AI agent —— 主入口 |
-| `CLAUDE.md` / `CODEX.md` | Claude Code / Codex 专用 |
-| `skills/` | Agent skills(详细工作流) |
-| `scripts/` | Python 采集器 |
-| `example-credentials/` | cookie 文件模板 |
+agent 会装依赖、引导你用 Cookie-Editor 导出 cookie、跑只读采集。
 
-## 安全性
+## 手动上手
 
-- **只读** —— 绝不 post、编辑、删除内容,也不修改账号设置
-- Cookies 仅保存在本地文件中,不会出现在对话里
-- 每个 business namespace 下只对应一个账号
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+python -m playwright install chromium          # 扫码登录和抖音采集都需要
 
-## Cookie Editor
+python -m collector init             --account xgame   # 建目录
+python -m collector bilibili login   --account xgame   # 弹窗扫码 → 存凭证
+python -m collector bilibili summary --account xgame --days 30
+python -m collector douyin   login   --account xgame   # 弹窗扫码 → 存 session
+python -m collector douyin   worklist --account xgame --days 30
+```
 
-安装此 Chrome extension 来导出 cookies:
+`login` 会弹一个真浏览器窗口、平台自己出二维码、你手机扫一下就存好登录态——不用再手动导 cookie。代价是它需要桌面会话（无头服务器跑不了）。cookie 过期就再 `login` 一次。
+
+## 装成命令（给同事复用）
+
+```bash
+pip install -e .          # 或 pip install git+https://github.com/BobXu2358/social-creator-collector
+collector --version
+```
+
+装好后直接敲 `collector <平台> <动作> --account <你的账号>`（和 `python -m collector ...` 等价）。同事各自装一份、各跑各的账号即可——`--account` 是命名空间，凭证按账号隔离在 `social/_secrets/<账号>/` 下，互不串。
+
+跨平台的 Chromium 解析见 [collector/browser.py](collector/browser.py)：默认用 Playwright 自带的 chromium，不依赖任何写死路径；要用系统 Chrome 就 `--chromium <路径>` 或设 `SCC_CHROMIUM`。
+
+## 安全
+
+- **只读**：绝不发布、编辑、删除、评论、关注或改账号设置。
+- **不回显 cookie**：长度/数量可以说，明文值不进对话、不进日志。
+- 一个账号一个 namespace，secret 全在 `social/_secrets/` 下，已被 `.gitignore` 排除。
+
+## Cookie-Editor（兜底）
+
+扫码登录是主路。只有在扫码被风控拒、或要在无头机器上跑时，才退回手动导 cookie：用这个
+Chrome 扩展导出成 **JSON**（不要 Netscape 文本格式），存进 `social/_secrets/` 后用
+`douyin import-cookies` 导入。详见 AGENTS.md。
 https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm

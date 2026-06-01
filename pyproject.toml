@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "social-creator-collector"
+description = "Read-only Bilibili & Douyin creator-data collector — one CLI, two platforms."
+readme = "README.md"
+requires-python = ">=3.9"
+dynamic = ["version"]
+dependencies = [
+    "httpx>=0.27",
+    "playwright>=1.40",
+]
+
+# Installs a `collector` command on PATH (same as `python -m collector`).
+[project.scripts]
+collector = "collector.cli:main"
+
+[tool.setuptools]
+packages = ["collector"]
+
+# Single source of truth for the version: collector/__init__.py
+[tool.setuptools.dynamic]
+version = {attr = "collector.__version__"}
