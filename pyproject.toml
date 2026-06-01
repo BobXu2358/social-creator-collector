@@ -11,6 +11,9 @@ dynamic = ["version"]
 dependencies = [
     "httpx>=0.27",
     "playwright>=1.40",
+    # zoneinfo needs an IANA tz database; Windows ships none, so ZoneInfo("Asia/Shanghai")
+    # raises ZoneInfoNotFoundError on import without this. POSIX uses the system db.
+    "tzdata; platform_system == 'Windows'",
 ]
 
 # Installs a `collector` command on PATH (same as `python -m collector`).

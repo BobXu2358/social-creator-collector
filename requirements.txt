@@ -2,3 +2,5 @@
 # After installing, fetch the bundled browser once: python -m playwright install chromium
 httpx>=0.27
 playwright>=1.40
+# zoneinfo has no tz database on Windows — ZoneInfo("Asia/Shanghai") fails on import without this.
+tzdata; platform_system == "Windows"
