@@ -10,6 +10,7 @@ Commands: probe, summary, comments, danmaku.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import re
 import statistics
@@ -368,7 +369,8 @@ def _video_info(client: httpx.Client, bvid: str) -> dict[str, Any]:
         "aid": d.get("aid"), "cid": d.get("cid"), "title": d.get("title"),
         "duration_s": d.get("duration"),
         "pages": [
-            {"page": p.get("page"), "cid": p.get("cid"), "part": p.get("part")}
+            {"page": p.get("page"), "cid": p.get("cid"), "part": p.get("part"),
+             "duration": p.get("duration")}
             for p in (d.get("pages") or [])
         ],
     }
@@ -393,7 +395,9 @@ def fetch_danmaku(client: httpx.Client, cid: int) -> list[dict[str, Any]]:
             "color": int(a[3]) if len(a) > 3 else 0,
             "ctime": int(a[4]) if len(a) > 4 else 0,
             "pool": int(a[5]) if len(a) > 5 else 0,
-            "content": m.group(2),
+            # XML entities (&amp; &lt; &#39; …) must be decoded or they pollute
+            # keyword counts and sample quotes downstream.
+            "content": html.unescape(m.group(2)),
         })
     return dms
 
@@ -411,11 +415,15 @@ def _keywords(texts: list[str], top_n: int = 8) -> list[tuple[str, int]]:
 def analyze_danmaku(
     danmaku: list[dict[str, Any]], *, title: str = "",
     bucket_s: int = 10, peak_n: int = 5, peak_method: str = "topn", filter_pool1: bool = True,
+    video_duration_s: float | None = None,
 ) -> dict[str, Any]:
     dms = [d for d in danmaku if d.get("pool", 0) != 1] if filter_pool1 else list(danmaku)
     if not dms:
         return {"title": title, "error": "no danmaku after filtering", "total_danmaku": 0, "peaks": []}
-    duration = max(d.get("time_s", 0) for d in dms)
+    # Prefer the real video length; danmaku can stop well before the end, which would
+    # understate duration and inflate density_per_min. Fall back to the last danmaku.
+    last_dm = max(d.get("time_s", 0) for d in dms)
+    duration = float(video_duration_s) if video_duration_s else last_dm
     buckets: Counter = Counter()
     bucket_content: dict[int, list[str]] = defaultdict(list)
     for d in dms:
@@ -487,20 +495,22 @@ def danmaku(
     stamp = _stamp()
     with _client() as c:
         if cid:
-            targets = [(cid, "")]
+            targets = [(cid, "", None)]
             title = f"cid={cid}"
         else:
             info = _video_info(c, bvid)
             title = info["title"] or bvid
-            pages = info["pages"] or [{"cid": info["cid"], "part": title, "page": 1}]
-            targets = [(p["cid"], p.get("part", "")) for p in pages]
+            pages = info["pages"] or [{"cid": info["cid"], "part": title, "page": 1,
+                                       "duration": info.get("duration_s")}]
+            targets = [(p["cid"], p.get("part", ""), p.get("duration")) for p in pages]
         out = []
-        for target_cid, part in targets:
+        for target_cid, part, dur in targets:
             dms = fetch_danmaku(c, target_cid)
             part_title = part or title
             analysis = analyze_danmaku(
                 dms, title=part_title, bucket_s=bucket_s, peak_n=peak_n,
                 peak_method=peak_method, filter_pool1=filter_pool1,
+                video_duration_s=dur,
             )
             jp = raw / f"bilibili-danmaku-{target_cid}-{stamp}.json"
             mp = processed / f"bilibili-danmaku-{target_cid}-{stamp}.md"
