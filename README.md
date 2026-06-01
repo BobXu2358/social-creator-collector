@@ -33,6 +33,15 @@ python -m collector douyin   worklist --account xgame --days 30
 
 `login` 会弹一个真浏览器窗口、平台自己出二维码、你手机扫一下就存好登录态——不用再手动导 cookie。代价是它需要桌面会话（无头服务器跑不了）。cookie 过期就再 `login` 一次。
 
+## 装成命令（给同事复用）
+
+```bash
+pip install -e .          # 或 pip install git+https://github.com/BobXu2358/social-creator-collector
+collector --version
+```
+
+装好后直接敲 `collector <平台> <动作> --account <你的账号>`（和 `python -m collector ...` 等价）。同事各自装一份、各跑各的账号即可——`--account` 是命名空间，凭证按账号隔离在 `social/_secrets/<账号>/` 下，互不串。
+
 跨平台的 Chromium 解析见 [collector/browser.py](collector/browser.py)：默认用 Playwright 自带的 chromium，不依赖任何写死路径；要用系统 Chrome 就 `--chromium <路径>` 或设 `SCC_CHROMIUM`。
 
 ## 安全

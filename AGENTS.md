@@ -14,9 +14,13 @@ You set it up and run it safely — never paste secrets into chat, never print c
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .                         # or: pip install -r requirements.txt
 python -m playwright install chromium    # only needed for the Douyin commands
 ```
+
+`pip install -e .` also puts a `collector` command on PATH (identical to
+`python -m collector`). Examples below use `python -m collector` so they work
+without installing.
 
 Chromium is resolved cross-platform (see `collector/browser.py`): the default is
 Playwright's bundled browser — no hardcoded path. Override with `--chromium <path>`,
