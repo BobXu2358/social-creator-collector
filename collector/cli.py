@@ -179,9 +179,12 @@ def _build_parser() -> argparse.ArgumentParser:
     d_fg = dy.add_parser("fan-growth", parents=[common],
                          help="per-video fan growth (粉丝增量) from DOM")
     d_fg.add_argument("--storage-state", default="", dest="storage_state")
+    d_fg.add_argument("--max-scroll", type=int, default=40, dest="max_scroll",
+                      help="max scroll rounds to lazy-load the 投稿列表")
     _chromium(d_fg)
     d_fg.set_defaults(func=lambda a: douyin.fan_growth(
-        ws=_ws(a), account=a.account, state_path=_douyin_state(a), chromium=a.chromium or None))
+        ws=_ws(a), account=a.account, state_path=_douyin_state(a), chromium=a.chromium or None,
+        max_scroll=a.max_scroll))
 
     d_cmt = dy.add_parser("comments", parents=[common], help="collect video comments")
     d_cmt.add_argument("--storage-state", default="", dest="storage_state")

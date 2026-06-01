@@ -64,9 +64,16 @@ There is **no API** for per-video fan growth; it lives only in the 投稿列表 
 `creator.douyin.com/creator-micro/data-center/content`. The `douyin fan-growth` command:
 1. opens that page with the imported storage state,
 2. clicks the 投稿列表 tab,
-3. extracts the table and locates the 粉丝增量 column **by header text** (not a fixed index),
-4. **fails loud** if the 粉丝增量 header is gone — meaning Douyin redesigned the table and
+3. **scrolls the window until the rendered row count stops growing** (the table lazy-loads on
+   scroll — there is no pager), then extracts the table and locates the 粉丝增量 column
+   **by header text** (not a fixed index),
+4. **fails loud** if the 粉丝增量 header is gone — Douyin redesigned the table and
    `collector/douyin.py` (`_EXTRACT_TABLE_JS` / `fan_growth`) needs re-inspection.
+
+**Scope:** the 投稿列表 is bounded by its 发布时间 (publish-time) filter — by default it returns
+roughly the last ~3 months of works (verified live: 13 rows back to ~90 days), which covers a
+monthly cadence comfortably. Pulling *older* history means widening that date picker, which this
+command does **not** automate. `--max-scroll` caps scroll rounds (default 40).
 
 If it errors with "column not found" or "投稿列表 tab not found", open the page in a headed
 browser, inspect the new structure, and update that one function.

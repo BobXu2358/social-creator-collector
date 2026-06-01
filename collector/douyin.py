@@ -330,13 +330,38 @@ _EXTRACT_TABLE_JS = """() => {
 }"""
 
 
-def fan_growth(*, ws: Path, account: str, state_path: Path, chromium: str | None) -> dict[str, Any]:
-    return asyncio.run(_fan_growth(ws, account, state_path, chromium))
+def _parse_fan_table(table: list) -> list:
+    """Locate the 粉丝增量 column by header TEXT (survives reordering) and parse the
+    data rows. Returns [] if no 粉丝增量 header is present in this table snapshot.
+    """
+    header_idx = next((i for i, row in enumerate(table)
+                       if any(_FAN_COL in (c or "") for c in row)), None)
+    if header_idx is None:
+        return []
+    header = table[header_idx]
+    fan_col = next(i for i, c in enumerate(header) if _FAN_COL in (c or ""))
+    rows = []
+    for row in table[header_idx + 1:]:
+        if len(row) <= fan_col or not row[0]:
+            continue
+        first = row[0].split("\n")
+        rows.append({
+            "title": first[0],
+            "published": first[1] if len(first) > 1 else "",
+            "fan_growth_raw": row[fan_col],
+            "fan_growth": _parse_int(row[fan_col]),
+        })
+    return rows
 
 
-async def _fan_growth(ws, account, state_path, chromium) -> dict[str, Any]:
+def fan_growth(*, ws: Path, account: str, state_path: Path, chromium: str | None,
+               max_scroll: int = 40) -> dict[str, Any]:
+    return asyncio.run(_fan_growth(ws, account, state_path, chromium, max_scroll))
+
+
+async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str, Any]:
     if not state_path.exists():
-        raise CollectorError(f"missing Douyin storage state; run import-cookies first: {state_path}")
+        raise CollectorError(f"missing Douyin storage state; run login/import-cookies first: {state_path}")
     async_playwright = _import_playwright()
     async with async_playwright() as p:
         browser = await _launch(p, chromium)
@@ -352,33 +377,30 @@ async def _fan_growth(ws, account, state_path, chromium) -> dict[str, Any]:
                 "could not find the 投稿列表 tab — data-center layout changed or not logged in"
             ) from exc
         await page.wait_for_timeout(5000)
-        table = await page.evaluate(_EXTRACT_TABLE_JS)
 
-    if not table:
-        raise CollectorError("投稿列表 table not found in DOM (layout changed or empty account)")
-    # Locate the 粉丝增量 column by header TEXT, not a fixed index — survives
-    # column reordering. Fail loud if the marker is gone (Douyin redesigned it).
-    header_idx = next((i for i, row in enumerate(table)
-                       if any(_FAN_COL in (c or "") for c in row)), None)
-    if header_idx is None:
+        # 投稿列表 has NO pager — it lazy-loads rows on WINDOW scroll, bounded by its
+        # 发布时间 filter. Scroll until the rendered cell count stops growing, then
+        # extract the whole table once. (Older history needs widening that date
+        # filter, which this command does not drive — see the README note.)
+        prev, scrolls = -1, 0
+        for _ in range(max_scroll):
+            count = await page.evaluate("() => document.querySelectorAll('td,th').length")
+            if count == prev:
+                break
+            prev = count
+            await page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+            await page.mouse.wheel(0, 3000)
+            await page.wait_for_timeout(1500)
+            scrolls += 1
+        table = await page.evaluate(_EXTRACT_TABLE_JS)
+        await browser.close()
+
+    rows = _parse_fan_table(table)
+    if not rows:
         raise CollectorError(
-            f"'{_FAN_COL}' column not found in 投稿列表 header — Douyin changed the table; "
+            f"'{_FAN_COL}' column not found in 投稿列表 — Douyin changed the table; "
             "re-inspect the DOM and update collector/douyin.py."
         )
-    header = table[header_idx]
-    fan_col = next(i for i, c in enumerate(header) if _FAN_COL in (c or ""))
-    rows = []
-    for row in table[header_idx + 1:]:
-        if len(row) <= fan_col or not row[0]:
-            continue
-        first = row[0].split("\n")
-        growth_raw = row[fan_col]
-        rows.append({
-            "title": first[0],
-            "published": first[1] if len(first) > 1 else "",
-            "fan_growth_raw": growth_raw,
-            "fan_growth": _parse_int(growth_raw),
-        })
 
     raw, processed = output_dirs(ws, account, "douyin")
     stamp = _stamp()
@@ -386,13 +408,14 @@ async def _fan_growth(ws, account, state_path, chromium) -> dict[str, Any]:
         "account": account, "platform": "douyin", "metric": "fan_growth (粉丝增量)",
         "source": "Douyin creator data-center 投稿列表 DOM",
         "captured_at": datetime.now(TZ).isoformat(),
-        "row_count": len(rows), "rows": rows,
+        "scroll_rounds": scrolls, "row_count": len(rows), "rows": rows,
+        "note": "bounded by the 投稿列表 发布时间 filter; widen it for older history",
     }
     jp = raw / f"douyin-fan-growth-{stamp}.json"
     mp = processed / f"douyin-fan-growth-{stamp}.md"
     jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     lines = [f"# {account} Douyin per-video fan growth", "",
-             f"Captured at: {result['captured_at']}", "",
+             f"Captured at: {result['captured_at']}  ·  rows: {len(rows)}", "",
              "| Published | Title | 粉丝增量 |", "|---|---|---:|"]
     for r in rows:
         title = r["title"].replace("|", "/")[:80]
