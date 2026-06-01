@@ -12,6 +12,8 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+import httpx
+
 from collector import bilibili, douyin, schema
 from collector.cli import main
 from collector.paths import CollectorError, output_dirs, safe_name, secret_dir, workspace_root
@@ -228,6 +230,58 @@ class CanonicalSchema(unittest.TestCase):
                                    fan_inc=123, captured_at="c")
         self.assertEqual((row["platform"], row["date"], row["fan_inc"]), ("bilibili", "2026-05-30", 123))
         self.assertEqual(row["schema_version"], schema.SCHEMA_VERSION)
+
+
+class _SeqClient:
+    """Minimal stand-in for httpx.Client: returns/raises a scripted sequence of steps."""
+
+    def __init__(self, steps):
+        self._steps = list(steps)
+        self.calls = 0
+
+    def get(self, url, params=None):
+        self.calls += 1
+        step = self._steps.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+class _Resp:
+    def __init__(self, status=200, payload=None):
+        self.status_code = status
+        self._payload = payload if payload is not None else {}
+        self.url = "https://api.bilibili.com/test"
+
+    def json(self):
+        return self._payload
+
+
+class RetryBehavior(unittest.TestCase):
+    def test_retries_transient_then_succeeds(self):
+        client = _SeqClient([httpx.ConnectError("boom"), _Resp(503),
+                             _Resp(200, {"code": 0, "data": {"ok": 1}})])
+        obj = bilibili._get_json(client, "u", retries=3, backoff_s=0)
+        self.assertEqual(obj["data"]["ok"], 1)
+        self.assertEqual(client.calls, 3)
+
+    def test_risk_code_fails_fast_without_retry(self):
+        client = _SeqClient([_Resp(200, {"code": -412, "message": "blocked"})])
+        with self.assertRaises(CollectorError):
+            bilibili._get_json(client, "u", retries=3, backoff_s=0)
+        self.assertEqual(client.calls, 1)  # never hammered a risk-control code
+
+    def test_other_4xx_not_retried(self):
+        client = _SeqClient([_Resp(404)])
+        with self.assertRaises(CollectorError):
+            bilibili._get_json(client, "u", retries=3, backoff_s=0)
+        self.assertEqual(client.calls, 1)
+
+    def test_exhausts_retries_on_persistent_5xx(self):
+        client = _SeqClient([_Resp(500), _Resp(500), _Resp(500), _Resp(500)])
+        with self.assertRaises(CollectorError):
+            bilibili._get_json(client, "u", retries=3, backoff_s=0)
+        self.assertEqual(client.calls, 4)  # 1 initial + 3 retries
 
 
 @unittest.skipUnless(jsonschema is not None, "jsonschema not installed (pip install -e '.[dev]')")
