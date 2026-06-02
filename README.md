@@ -53,6 +53,8 @@ collector --version
 - **只读**：绝不发布、编辑、删除、评论、关注或改账号设置。
 - **不回显 cookie**：长度/数量可以说，明文值不进对话、不进日志。
 - 一个账号一个 namespace，secret 全在 `social/_secrets/` 下，已被 `.gitignore` 排除。
+- 如果现有命令不够回答业务问题，可以让 agent 做一次性的只读 discovery；但不要改本地 core 代码。
+  发现稳定有用的新数据时，用 GitHub 的 Discovery finding 模板开 issue，由维护者决定是否加入正式命令。
 
 ## Cookie-Editor（兜底）
 

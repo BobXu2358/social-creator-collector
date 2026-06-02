@@ -1,0 +1,105 @@
+name: Discovery finding
+description: Report read-only fallback data that may deserve a supported collector command
+title: "[Discovery] "
+labels: ["discovery", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this after a read-only agent fallback found useful creator data that is not yet supported by core commands.
+
+        Do not include cookies, tokens, storage state, auth headers, full signed URLs, private user lists, raw comments/messages, or other sensitive account data.
+  - type: textarea
+    id: business-question
+    attributes:
+      label: Business question
+      description: What user question needed this data?
+      placeholder: "Example: Estimate whether a giveaway increased account growth beyond baseline."
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - bilibili
+        - douyin
+        - both
+    validations:
+      required: true
+  - type: input
+    id: collector-version
+    attributes:
+      label: Collector version or commit
+      placeholder: "collector 2.2.0, main@abcdef0, etc."
+    validations:
+      required: true
+  - type: textarea
+    id: missing-core-data
+    attributes:
+      label: What core data was insufficient?
+      description: List supported commands you tried and what was missing.
+      placeholder: |
+        Tried:
+        - collector douyin fan-trend --days 30
+        - collector douyin worklist --days 30
+
+        Missing:
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: sanitized-endpoints
+    attributes:
+      label: Sanitized endpoint paths or pages
+      description: Remove tokens, signatures, full query strings, auth headers, and request bodies.
+      placeholder: |
+        - https://creator.douyin.com/aweme/janus/creator/data/overview/all/
+        - https://member.bilibili.com/x/web/data/v2/fans/stat/source
+    validations:
+      required: true
+  - type: textarea
+    id: field-shape
+    attributes:
+      label: Redacted field shape / example counts
+      description: Summarize keys, row counts, and harmless example numbers. Do not paste raw sensitive payloads.
+      placeholder: |
+        {
+          "data": {
+            "new_fans": {"option_list": "list[30]"},
+            "profile": {"option_list": "list[30]"}
+          }
+        }
+    validations:
+      required: true
+  - type: textarea
+    id: inferred-meaning
+    attributes:
+      label: Inferred meaning and uncertainty
+      description: Say what the fields appear to mean, and what is still ambiguous.
+      placeholder: |
+        - new_fans.option_list appears to be daily net new fans.
+        - fans.option_list may mean follower plays, not total fan count.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction notes
+      description: Did it reproduce more than once? Which page/flow triggered it? Keep it short.
+      placeholder: |
+        Reproduced twice by opening creator home and fetching the same endpoint from the page context.
+    validations:
+      required: false
+  - type: textarea
+    id: redaction-checklist
+    attributes:
+      label: Redaction checklist
+      value: |
+        - [ ] No cookies/tokens/storage state/auth headers
+        - [ ] No full signed URLs or query secrets
+        - [ ] No private user lists
+        - [ ] No raw comments/messages
+        - [ ] No account secrets or local secret paths beyond `social/_secrets/<account>/...`
+    validations:
+      required: true
