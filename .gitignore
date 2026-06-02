@@ -1,5 +1,7 @@
 _secrets/
 social/_secrets/
+social/*/*/raw/
+social/*/*/processed/
 *.credentials.json
 *.cookies.json
 *.storage_state.json

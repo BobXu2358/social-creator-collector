@@ -129,6 +129,39 @@ class PureParsers(unittest.TestCase):
         self.assertNotIn("extra", c)
         self.assertEqual(douyin._normalize_cookie({"name": "x", "value": "y", "sameSite": "none"})["sameSite"], "None")
 
+    def test_check_cookies_does_not_expose_domain_list(self):
+        cookies = [
+            {"name": "sessionid", "value": "x", "domain": ".douyin.com"},
+            {"name": "unrelated", "value": "y", "domain": ".example.com"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cookies.json"
+            path.write_text(json.dumps(cookies), encoding="utf-8")
+            result = douyin.check_cookies(path=path)
+        self.assertEqual(result["douyin_domain_cookie_count"], 1)
+        self.assertEqual(result["other_domain_cookie_count"], 1)
+        self.assertEqual(result["important_names_present"], ["sessionid"])
+        self.assertNotIn("domains", result)
+
+    def test_import_cookie_verification_requires_positive_signal(self):
+        login_body = "请扫码登录后继续"
+        self.assertFalse(douyin._import_cookie_verification(
+            login_body, {"status": 200, "json": {}}, nickname=None, douyin_id=None,
+        )["ok"])
+        self.assertTrue(douyin._import_cookie_verification(
+            "作品管理", {"status": 200, "json": {}}, nickname=None, douyin_id=None,
+        )["ok"])
+        self.assertTrue(douyin._import_cookie_verification(
+            "", {"status": 200, "json": {"aweme_list": [], "has_more": False}},
+            nickname=None, douyin_id=None,
+        )["ok"])
+        failed_api = douyin._import_cookie_verification(
+            "", {"status": 200, "json": {"status_code": 8, "status_msg": "not login"}},
+            nickname=None, douyin_id=None,
+        )
+        self.assertFalse(failed_api["ok"])
+        self.assertEqual(failed_api["api_error"], {"status_code": 8, "status_msg": "not login"})
+
     def test_analyze_danmaku_finds_peak(self):
         # 30 danmaku clustered at t=100s, a few scattered → peak bucket at 100.
         dms = [{"time_s": 100 + i * 0.1, "pool": 0, "content": "笑死 这段太好笑"} for i in range(30)]
@@ -267,6 +300,13 @@ class PureParsers(unittest.TestCase):
             {"api_error": {"status_code": 8}},
         ]))
         self.assertFalse(douyin._worklist_likely_login_required("", [meta]))
+
+    def test_comments_no_api_diagnostics(self):
+        diag = douyin._comments_no_api_diagnostics("扫码登录", 0)
+        self.assertFalse(diag["comment_api_seen"])
+        self.assertTrue(diag["landing_on_login_page"])
+        self.assertEqual(diag["api_pages_intercepted"], 0)
+        self.assertTrue(douyin._comments_no_api_diagnostics("作品详情", 2)["comment_api_seen"])
 
 
 class CanonicalSchema(unittest.TestCase):
