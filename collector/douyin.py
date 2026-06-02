@@ -86,7 +86,12 @@ def _normalize_cookie(c: dict[str, Any]) -> dict[str, Any]:
     nc.setdefault("path", "/")
     if "sameSite" in nc:
         s = str(nc["sameSite"]).lower()
-        nc["sameSite"] = {"strict": "Strict", "none": "None"}.get(s, "Lax")
+        nc["sameSite"] = {
+            "strict": "Strict",
+            "lax": "Lax",
+            "none": "None",
+            "no_restriction": "None",
+        }.get(s, "Lax")
     if nc.get("expires") in (None, "", 0):
         nc.pop("expires", None)
     return nc
@@ -231,6 +236,37 @@ def _aweme_canonical(n: dict[str, Any], account: str, captured_at: str) -> dict[
         })
 
 
+def _looks_like_login_page(body: str) -> bool:
+    markers = ("扫码登录", "验证码登录", "登录/注册", "手机号登录", "抖音号登录")
+    return any(m in body for m in markers)
+
+
+def _api_error(js: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(js, dict):
+        return {}
+    out = {}
+    for key in ("status_code", "status_msg", "error_code", "error_msg", "code", "message", "msg"):
+        value = js.get(key)
+        if value not in (None, "", 0, "0"):
+            out[key] = value
+    return out
+
+
+def _worklist_page_meta(pn: int, obj: dict[str, Any], js: dict[str, Any], aw: list) -> dict[str, Any]:
+    meta: dict[str, Any] = {
+        "pn": pn,
+        "status": obj.get("status"),
+        "count": len(aw),
+        "has_more": js.get("has_more"),
+    }
+    if obj.get("textPrefix"):
+        meta["textPrefix"] = obj["textPrefix"]
+    api_error = _api_error(js)
+    if api_error:
+        meta["api_error"] = api_error
+    return meta
+
+
 def _normalize_aweme(a: dict[str, Any]) -> dict[str, Any]:
     stat = a.get("Statistics") or a.get("statistics") or {}
     item = {
@@ -263,12 +299,17 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
     async_playwright = _import_playwright()
     all_items: list[dict[str, Any]] = []
     pages_meta: list[dict[str, Any]] = []
+    landing_body = ""
     async with async_playwright() as p, _browser(p, chromium) as browser:
         ctx = await browser.new_context(storage_state=str(state_path), **_CTX)
         page = await ctx.new_page()
         await page.goto("https://creator.douyin.com/creator-micro/content/manage",
                         wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(5000)
+        try:
+            landing_body = (await page.locator("body").inner_text(timeout=5000))[:3000]
+        except Exception:
+            landing_body = ""
         cursor = 0
         for pn in range(1, max_pages + 1):
             url = ("/janus/douyin/creator/pc/work_list?scene=star_atlas"
@@ -282,8 +323,7 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
                 }""", url)
             js = obj.get("json") or {}
             aw = js.get("aweme_list") or []
-            pages_meta.append({"pn": pn, "status": obj.get("status"), "count": len(aw),
-                               "has_more": js.get("has_more")})
+            pages_meta.append(_worklist_page_meta(pn, obj, js, aw))
             all_items.extend(aw)
             nxt = js.get("max_cursor") or js.get("cursor")
             if not aw or not js.get("has_more") or nxt in (None, "", cursor):
@@ -322,6 +362,10 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
     }
     if not items_c:
         result["warning"] = "no works returned — storage state may be expired; re-run login/import-cookies"
+        result["diagnostics"] = {
+            "landing_on_login_page": _looks_like_login_page(landing_body),
+            "pages": pages_meta,
+        }
     jp = raw / f"douyin-worklist-{days or 'all'}d-{stamp}.json"
     mp = processed / f"douyin-worklist-{days or 'all'}d-{stamp}.md"
     jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
