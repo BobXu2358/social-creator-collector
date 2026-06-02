@@ -263,6 +263,10 @@ class PureParsers(unittest.TestCase):
         self.assertEqual(meta["status"], 403)
         self.assertEqual(meta["textPrefix"], "<html>blocked</html>")
         self.assertEqual(meta["api_error"], {"status_code": 1001, "status_msg": "risk"})
+        self.assertTrue(douyin._worklist_likely_login_required("", [
+            {"api_error": {"status_code": 8}},
+        ]))
+        self.assertFalse(douyin._worklist_likely_login_required("", [meta]))
 
 
 class CanonicalSchema(unittest.TestCase):
