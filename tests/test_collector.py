@@ -301,6 +301,47 @@ class PureParsers(unittest.TestCase):
         ]))
         self.assertFalse(douyin._worklist_likely_login_required("", [meta]))
 
+    def test_douyin_fan_trend_rows(self):
+        captured = "2026-06-02T12:00:00+08:00"
+        payload = {
+            "data": {
+                "new_fans": {
+                    "option_list": [
+                        {"date": "2026-05-31", "count": "1,234", "last_day_incr_rate": "+10%"},
+                        {"date": "2026-06-01", "count": "2883"},
+                    ],
+                },
+                "fans": {
+                    "option_list": [
+                        {"date": "2026-05-31", "count": "83,000"},
+                        {"date": "2026-06-01", "count": "85,883"},
+                    ],
+                },
+                "cancel_fans": {
+                    "option_list": [
+                        {"date": "2026-05-31", "count": "12"},
+                        {"date": "2026-06-01", "count": "95"},
+                    ],
+                },
+            },
+        }
+        rows = douyin._douyin_fan_trend_rows(payload, "xgame", captured)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["schema_version"], schema.SCHEMA_VERSION)
+        self.assertEqual(rows[0]["platform"], "douyin")
+        self.assertEqual(rows[0]["fan_inc"], 1234)
+        self.assertEqual(rows[0]["fan_count"], 83000)
+        self.assertEqual(rows[0]["unfollow_count"], 12)
+        self.assertEqual(rows[0]["last_day_incr_rate"], "+10%")
+        self.assertEqual(rows[1]["fan_inc"], 2883)
+
+    def test_douyin_fan_trend_days_type(self):
+        self.assertEqual(douyin._overview_days_type(7), 1)
+        self.assertEqual(douyin._overview_days_type(15), 2)
+        self.assertEqual(douyin._overview_days_type(30), 3)
+        with self.assertRaises(CollectorError):
+            douyin._overview_days_type(90)
+
     def test_comments_no_api_diagnostics(self):
         diag = douyin._comments_no_api_diagnostics("扫码登录", 0)
         self.assertFalse(diag["comment_api_seen"])

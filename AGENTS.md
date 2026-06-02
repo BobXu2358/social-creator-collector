@@ -111,6 +111,7 @@ python -m collector <group> <action> --account <account> [options]
 | `douyin check-cookies --account X` | validate a Cookie-Editor export's structure |
 | `douyin import-cookies --account X` | cookies → Playwright storage state + verify login |
 | `douyin worklist --account X --days 30` | creator-center work list + basic metrics |
+| `douyin fan-trend --account X --days 30` | account-level daily net fan trend |
 | `douyin fan-growth --account X` | **per-video 粉丝增量** from 投稿列表 DOM |
 | `douyin comments --account X --aweme-id ID` | collect video comments |
 
@@ -133,6 +134,9 @@ downstream tools against this shape, not against one command's incidental JSON.
 - **Douyin per-video fan growth has no API** — it only exists in the 投稿列表 table DOM.
   `douyin fan-growth` locates the 粉丝增量 column by header text and fails loud if Douyin
   redesigns the table (rather than silently returning a wrong column).
+- **Douyin account-level daily net fans do have a creator-center overview API.**
+  `douyin fan-trend --days 30` reads `new_fans.option_list` from that API; this is the
+  right input for campaign lift analysis. It is not a local snapshot system.
 - **B站 comments need a login cookie.** The anonymous/`x/v2/reply/wbi/main` endpoints
   return ~3 hot comments or trigger `412` — the collector uses `x/v2/reply/main` with cookie.
 - **Cookie expiry is the usual failure.** If a command returns empty or a login warning,

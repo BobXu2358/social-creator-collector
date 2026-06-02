@@ -196,6 +196,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ws=_ws(a), account=a.account, state_path=_douyin_state(a), days=a.days,
         max_pages=a.max_pages, chromium=a.chromium or None))
 
+    d_ft = dy.add_parser("fan-trend", parents=[common],
+                         help="account-level daily net fan trend")
+    d_ft.add_argument("--storage-state", default="", dest="storage_state")
+    d_ft.add_argument("--days", type=int, choices=[7, 15, 30], default=30)
+    _chromium(d_ft)
+    d_ft.set_defaults(func=lambda a: douyin.fan_trend(
+        ws=_ws(a), account=a.account, state_path=_douyin_state(a), days=a.days,
+        chromium=a.chromium or None))
+
     d_fg = dy.add_parser("fan-growth", parents=[common],
                          help="per-video fan growth (粉丝增量) from DOM")
     d_fg.add_argument("--storage-state", default="", dest="storage_state")

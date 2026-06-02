@@ -5,7 +5,7 @@
 ## 它能采什么
 
 - **B站**（纯 HTTP）：登录校验、涨粉趋势 + 单稿数据（播放/涨粉/投币/评论/点赞）、视频评论、弹幕峰值分析。
-- **抖音**（无头浏览器）：导入 cookie、作品列表、**单稿粉丝增量**（接口拿不到，从投稿列表 DOM 提取）、视频评论。
+- **抖音**（无头浏览器）：导入 cookie、作品列表、账号每日净增粉丝、**单稿粉丝增量**（接口拿不到，从投稿列表 DOM 提取）、视频评论。
 
 两个平台的数据路径不同是有原因的：B站三个 cookie 拼成请求头就够了，抖音的登录态和 `a-bogus` 签名只能在真浏览器里生成，所以必须起 Playwright。
 
@@ -29,6 +29,7 @@ python -m collector bilibili login   --account xgame   # 弹窗扫码 → 存凭
 python -m collector bilibili summary --account xgame --days 30
 python -m collector douyin   login   --account xgame   # 弹窗扫码 → 存 session
 python -m collector douyin   worklist --account xgame --days 30
+python -m collector douyin   fan-trend --account xgame --days 30
 ```
 
 > **Windows（PowerShell）**：把第一行换成 `py -3 -m venv .venv` 再 `.\.venv\Scripts\Activate.ps1`（别用系统自带的 `python`——那通常是微软商店占位符，先 `winget install Python.Python.3.12` 装真 Python，用 `py -V` 确认）。其余命令一致；`tzdata` 会随依赖自动装。只用 B站 可跳过 `playwright install chromium`（纯 HTTP，不开浏览器）。
