@@ -124,7 +124,7 @@ class PureParsers(unittest.TestCase):
 
     def test_normalize_cookie_samesite_and_path(self):
         c = douyin._normalize_cookie({"name": "x", "value": "y", "sameSite": "no_restriction", "extra": 1})
-        self.assertEqual(c["sameSite"], "Lax")
+        self.assertEqual(c["sameSite"], "None")
         self.assertEqual(c["path"], "/")
         self.assertNotIn("extra", c)
         self.assertEqual(douyin._normalize_cookie({"name": "x", "value": "y", "sameSite": "none"})["sameSite"], "None")
@@ -151,25 +151,75 @@ class PureParsers(unittest.TestCase):
         # without it, falls back to the last danmaku timestamp (old behaviour)
         self.assertLess(bilibili.analyze_danmaku(dms)["duration_s"], 110)
 
-    def test_fetch_danmaku_unescapes_xml_entities(self):
-        import zlib as _zlib
-        xml = '<i><d p="1.0,1,25,16777215,0,0">A &amp; B &lt;tag&gt; &#39;q&#39;</d></i>'
-        co = _zlib.compressobj(9, _zlib.DEFLATED, -_zlib.MAX_WBITS)
-        raw = co.compress(xml.encode("utf-8")) + co.flush()
+    def test_decode_danmaku_segment_payload(self):
+        def varint(v: int) -> bytes:
+            out = bytearray()
+            while True:
+                b = v & 0x7F
+                v >>= 7
+                out.append(b | 0x80 if v else b)
+                if not v:
+                    return bytes(out)
+
+        def field_varint(field: int, value: int) -> bytes:
+            return varint((field << 3) | 0) + varint(value)
+
+        def field_bytes(field: int, value: bytes) -> bytes:
+            return varint((field << 3) | 2) + varint(len(value)) + value
+
+        elem = b"".join([
+            field_varint(2, 1234),                         # progress ms
+            field_varint(3, 1),                            # mode
+            field_bytes(7, "A & B <tag> 'q'".encode()),    # content
+            field_varint(11, 0),                           # pool
+        ])
+        payload = field_bytes(1, elem)
 
         class _Resp:
-            content = raw
+            status_code = 200
+
+            def __init__(self, content):
+                self.content = content
 
             def raise_for_status(self):
                 pass
 
         class _Client:
+            def __init__(self):
+                self.contents = [payload, b""]
+                self.calls = 0
+
+            def get(self, url, params=None):
+                self.calls += 1
+                return _Resp(self.contents.pop(0))
+
+        client = _Client()
+        dms = bilibili.fetch_danmaku(client, cid=1)
+        self.assertEqual(len(dms), 1)
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(dms[0]["time_s"], 1.234)
+        self.assertEqual(dms[0]["type"], 1)
+        self.assertEqual(dms[0]["pool"], 0)
+        self.assertEqual(dms[0]["content"], "A & B <tag> 'q'")
+
+    def test_fetch_danmaku_treats_304_as_segment_end(self):
+        class _Resp:
+            status_code = 304
+            content = b""
+
+            def raise_for_status(self):
+                raise AssertionError("304 should stop before raise_for_status")
+
+        class _Client:
             def get(self, url, params=None):
                 return _Resp()
 
-        dms = bilibili.fetch_danmaku(_Client(), cid=1)
-        self.assertEqual(len(dms), 1)
-        self.assertEqual(dms[0]["content"], "A & B <tag> 'q'")
+        self.assertEqual(bilibili.fetch_danmaku(_Client(), cid=1), [])
+
+    def test_date_from_epoch_rejects_bad_values(self):
+        self.assertIsNone(bilibili._date_from_epoch(None))
+        self.assertIsNone(bilibili._date_from_epoch("bad"))
+        self.assertIsNotNone(bilibili._date_from_epoch(1716000000))
 
     def test_parse_fan_table_locates_column_by_header(self):
         table = [
@@ -200,6 +250,23 @@ class PureParsers(unittest.TestCase):
         snake = douyin._normalize_aweme({"aweme_id": "456", "desc": "t2",
                                          "create_time": 1716000000, "play_count": 9, "digg_count": 1})
         self.assertEqual((snake["aweme_id"], snake["play"], snake["like"]), ("456", 9, 1))
+
+    def test_worklist_empty_diagnostics_helpers(self):
+        self.assertTrue(douyin._looks_like_login_page("请扫码登录后继续"))
+        self.assertFalse(douyin._looks_like_login_page("作品管理"))
+        meta = douyin._worklist_page_meta(
+            1,
+            {"status": 403, "textPrefix": "<html>blocked</html>"},
+            {"status_code": 1001, "status_msg": "risk", "has_more": False},
+            [],
+        )
+        self.assertEqual(meta["status"], 403)
+        self.assertEqual(meta["textPrefix"], "<html>blocked</html>")
+        self.assertEqual(meta["api_error"], {"status_code": 1001, "status_msg": "risk"})
+        self.assertTrue(douyin._worklist_likely_login_required("", [
+            {"api_error": {"status_code": 8}},
+        ]))
+        self.assertFalse(douyin._worklist_likely_login_required("", [meta]))
 
 
 class CanonicalSchema(unittest.TestCase):

@@ -22,15 +22,16 @@ Don't add a database, retention policy, or business accounts to the core — tha
 It's a normal git-installed package. Consumers should pin a tag:
 
 ```bash
-pip install "git+https://github.com/BobXu2358/social-creator-collector@v2.1.0"
+pip install "git+https://github.com/BobXu2358/social-creator-collector@<tag>"
 ```
 
 To ship a change:
 1. Branch → change → `pip install -e ".[dev]" && python -m unittest tests.test_collector`
    (offline tests must pass; CI runs them on every PR across Linux + Windows).
 2. PR → review → merge to `main`.
-3. **Tag a release**: `git tag v2.1.x && git push --tags`. Without a tag there's nothing to pin.
-4. Consumers bump their pin and re-install. (After merging the current PR, tag `v2.1.0`.)
+3. Bump `collector/__init__.py` to the next package version.
+4. **Tag a release**: `git tag vX.Y.Z && git push --tags`. Without a tag there's nothing to pin.
+5. Consumers bump their pin and re-install.
 
 Live collection (real cookies, scraping) can't be tested in CI — verify those paths by hand
 on a real account before tagging.

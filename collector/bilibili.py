@@ -10,14 +10,12 @@ Commands: probe, summary, comments, danmaku.
 from __future__ import annotations
 
 import asyncio
-import html
 import json
 import re
 import statistics
 import sys
 import time
 import urllib.parse
-import zlib
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -98,6 +96,13 @@ def _get_json(client: httpx.Client, url: str, params: dict[str, Any] | None = No
 
 def _stamp() -> str:
     return datetime.now(TZ).strftime("%Y%m%d-%H%M%S")
+
+
+def _date_from_epoch(ts: Any) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(int(ts), TZ)
+    except Exception:
+        return None
 
 
 # ── probe ────────────────────────────────────────────────────────────────
@@ -204,20 +209,22 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
             {"period": 1, "s_locale": "zh_CN", "type": "fan", "tmid": "", "t": int(time.time() * 1000)},
         )
         trend = (fan_obj.get("data") or {}).get("tendency") or []
-        if not trend:
+        trend_rows = [(x, _date_from_epoch(x.get("date_key"))) for x in trend if isinstance(x, dict)]
+        trend_rows = [(x, dt) for x, dt in trend_rows if dt is not None]
+        if not trend_rows:
             raise CollectorError("no Bilibili fan trend returned (cookie may lack creator access)")
-        latest = max(datetime.fromtimestamp(x["date_key"], TZ).date() for x in trend)
+        latest = max(dt.date() for _, dt in trend_rows)
         start = latest - _days(days - 1)
         captured = datetime.now(TZ).isoformat()
         fan_rows = sorted(
             (
                 schema.fan_trend_row(
                     platform="bilibili", account=account,
-                    date=datetime.fromtimestamp(x["date_key"], TZ).date().isoformat(),
+                    date=dt.date().isoformat(),
                     fan_inc=int(x.get("total_inc") or 0), captured_at=captured,
                 )
-                for x in trend
-                if start <= datetime.fromtimestamp(x["date_key"], TZ).date() <= latest
+                for x, dt in trend_rows
+                if start <= dt.date() <= latest
             ),
             key=lambda r: r["date"],
         )
@@ -234,9 +241,9 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
                 break
             for it in items:
                 pubtime = it.get("pubtime")
-                if not pubtime:
+                pub = _date_from_epoch(pubtime)
+                if pub is None:
                     continue
-                pub = datetime.fromtimestamp(int(pubtime), TZ)
                 if start <= pub.date() <= latest:
                     stat = it.get("real_stat") or it.get("stat") or {}
                     videos.append(schema.video_row(
@@ -252,7 +259,8 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
                             "full_play_ratio": stat.get("full_play_ratio"),
                         }))
             last_pubtime = items[-1].get("pubtime")
-            if last_pubtime and datetime.fromtimestamp(int(last_pubtime), TZ).date() < start:
+            last_pub = _date_from_epoch(last_pubtime)
+            if last_pub and last_pub.date() < start:
                 break
     videos.sort(key=lambda r: r["published_at"] or "", reverse=True)
 
@@ -406,29 +414,99 @@ def _video_info(client: httpx.Client, bvid: str) -> dict[str, Any]:
     }
 
 
-def fetch_danmaku(client: httpx.Client, cid: int) -> list[dict[str, Any]]:
-    """Danmaku via the deflate-compressed XML endpoint (x/v1/dm/list.so).
+def _read_varint(buf: bytes, pos: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while pos < len(buf):
+        b = buf[pos]
+        pos += 1
+        value |= (b & 0x7F) << shift
+        if not b & 0x80:
+            return value, pos
+        shift += 7
+        if shift > 63:
+            break
+    raise CollectorError("invalid Bilibili danmaku protobuf: unterminated varint")
 
-    Not gzip, not raw XML — decompress with ``zlib.decompress(raw, -MAX_WBITS)``.
-    Works without auth for public videos; >5000 danmaku may be truncated (the
-    protobuf seg endpoint would be needed then).
+
+def _iter_proto_fields(buf: bytes):
+    pos = 0
+    while pos < len(buf):
+        key, pos = _read_varint(buf, pos)
+        field, wire_type = key >> 3, key & 0x07
+        if wire_type == 0:
+            value, pos = _read_varint(buf, pos)
+            yield field, wire_type, value
+        elif wire_type == 1:
+            end = pos + 8
+            if end > len(buf):
+                raise CollectorError("invalid Bilibili danmaku protobuf: truncated fixed64")
+            yield field, wire_type, buf[pos:end]
+            pos = end
+        elif wire_type == 2:
+            size, pos = _read_varint(buf, pos)
+            end = pos + size
+            if end > len(buf):
+                raise CollectorError("invalid Bilibili danmaku protobuf: truncated bytes")
+            yield field, wire_type, buf[pos:end]
+            pos = end
+        elif wire_type == 5:
+            end = pos + 4
+            if end > len(buf):
+                raise CollectorError("invalid Bilibili danmaku protobuf: truncated fixed32")
+            yield field, wire_type, buf[pos:end]
+            pos = end
+        else:
+            raise CollectorError(f"unsupported Bilibili danmaku protobuf wire type {wire_type}")
+
+
+def _decode_danmaku_elem(buf: bytes) -> dict[str, Any]:
+    row: dict[str, Any] = {"time_s": 0.0, "type": 0, "pool": 0, "content": ""}
+    for field, wire_type, value in _iter_proto_fields(buf):
+        if field == 2 and wire_type == 0:      # progress, ms
+            row["time_s"] = int(value) / 1000
+        elif field == 3 and wire_type == 0:    # mode
+            row["type"] = int(value)
+        elif field == 7 and wire_type == 2:    # content
+            row["content"] = bytes(value).decode("utf-8", errors="replace")
+        elif field == 11 and wire_type == 0:   # pool
+            row["pool"] = int(value)
+    return row
+
+
+def _decode_danmaku_seg(buf: bytes) -> list[dict[str, Any]]:
+    rows = []
+    for field, wire_type, value in _iter_proto_fields(buf):
+        if field == 1 and wire_type == 2:
+            rows.append(_decode_danmaku_elem(bytes(value)))
+    return rows
+
+
+def fetch_danmaku(client: httpx.Client, cid: int, *, max_segments: int = 1000) -> list[dict[str, Any]]:
+    """Danmaku via Bilibili's protobuf segment endpoint.
+
+    The legacy XML endpoint (x/v1/dm/list.so) now returns non-raw-deflate payloads
+    for some current videos. seg.so returns roughly six-minute protobuf segments;
+    loop until the first empty segment, keeping analyze_danmaku's row shape.
     """
-    resp = client.get("https://api.bilibili.com/x/v1/dm/list.so", params={"oid": cid})
-    resp.raise_for_status()
-    text = zlib.decompress(resp.content, -zlib.MAX_WBITS).decode("utf-8", errors="replace")
     dms: list[dict[str, Any]] = []
-    for m in re.finditer(r'<d p="([^"]*)">(.*?)</d>', text):
-        a = m.group(1).split(",")
-        dms.append({
-            "time_s": float(a[0]) if a and a[0] else 0.0,
-            "type": int(a[1]) if len(a) > 1 else 0,
-            "color": int(a[3]) if len(a) > 3 else 0,
-            "ctime": int(a[4]) if len(a) > 4 else 0,
-            "pool": int(a[5]) if len(a) > 5 else 0,
-            # XML entities (&amp; &lt; &#39; …) must be decoded or they pollute
-            # keyword counts and sample quotes downstream.
-            "content": html.unescape(m.group(2)),
-        })
+    for segment_index in range(1, max_segments + 1):
+        resp = client.get(
+            "https://api.bilibili.com/x/v2/dm/web/seg.so",
+            params={"type": 1, "oid": cid, "segment_index": segment_index},
+        )
+        if getattr(resp, "status_code", 200) == 304:
+            break
+        resp.raise_for_status()
+        rows = _decode_danmaku_seg(resp.content)
+        if not rows:
+            break
+        dms.extend(rows)
+    else:
+        raise CollectorError(
+            f"Bilibili danmaku still had data after {max_segments} segments; "
+            "refusing an unbounded fetch"
+        )
     return dms
 
 

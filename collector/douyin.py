@@ -69,6 +69,41 @@ def _stamp() -> str:
     return datetime.now(TZ).strftime("%Y%m%d-%H%M%S")
 
 
+async def _body_text(page, *, timeout_ms: int = 10000, limit: int = 3000) -> str:
+    try:
+        await page.wait_for_function(
+            "() => document.body && document.body.innerText && document.body.innerText.trim().length > 0",
+            timeout=timeout_ms,
+        )
+        return (await page.locator("body").inner_text(timeout=2000))[:limit]
+    except Exception:
+        return ""
+
+
+async def _body_text_with_markers(
+    page, markers: tuple[str, ...], *, timeout_ms: int = 10000, limit: int = 3000,
+) -> str:
+    try:
+        await page.wait_for_function(
+            """markers => {
+                const text = (document.body && document.body.innerText || '').trim();
+                return text && markers.some(marker => text.includes(marker));
+            }""",
+            list(markers),
+            timeout=timeout_ms,
+        )
+    except Exception:
+        pass
+    return await _body_text(page, timeout_ms=2000, limit=limit)
+
+
+async def _wait_for_selector_or_short_fallback(page, selector: str, *, timeout_ms: int = 10000) -> None:
+    try:
+        await page.wait_for_selector(selector, timeout=timeout_ms)
+    except Exception:
+        await page.wait_for_timeout(1000)
+
+
 def _chmod_600(path: Path) -> None:
     """Best-effort lock down a secret file (storage state holds session cookies).
     Mirrors what Bilibili login does for its credential file; noop on Windows."""
@@ -86,7 +121,12 @@ def _normalize_cookie(c: dict[str, Any]) -> dict[str, Any]:
     nc.setdefault("path", "/")
     if "sameSite" in nc:
         s = str(nc["sameSite"]).lower()
-        nc["sameSite"] = {"strict": "Strict", "none": "None"}.get(s, "Lax")
+        nc["sameSite"] = {
+            "strict": "Strict",
+            "lax": "Lax",
+            "none": "None",
+            "no_restriction": "None",
+        }.get(s, "Lax")
     if nc.get("expires") in (None, "", 0):
         nc.pop("expires", None)
     return nc
@@ -131,11 +171,10 @@ async def _import_cookies(cookies_path, state_path, chromium, nickname, douyin_i
         page = await ctx.new_page()
         await page.goto("https://creator.douyin.com/creator-micro/home",
                         wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(8000)
-        body = (await page.locator("body").inner_text(timeout=5000))[:3000]
+        body = await _body_text(page, timeout_ms=12000)
         await ctx.storage_state(path=str(state_path))
     _chmod_600(state_path)
-    on_login_page = any(x in body for x in ("扫码登录", "验证码登录", "登录/注册"))
+    on_login_page = _looks_like_login_page(body)
     if on_login_page:
         raise CollectorError(
             "Douyin still on a login page after importing cookies — the export is stale. "
@@ -185,7 +224,6 @@ async def _login(state_path, chromium, timeout_s) -> dict[str, Any]:
                 "Douyin QR login timed out (no sessionid). Retry, or fall back to "
                 "Cookie-Editor export + import-cookies."
             )
-        await page.wait_for_timeout(2000)  # let creator home settle
         await ctx.storage_state(path=str(state_path))
     _chmod_600(state_path)
     return {"ok": True, "storage_state": str(state_path), "method": "qr-login"}
@@ -231,6 +269,54 @@ def _aweme_canonical(n: dict[str, Any], account: str, captured_at: str) -> dict[
         })
 
 
+def _looks_like_login_page(body: str) -> bool:
+    markers = ("扫码登录", "验证码登录", "登录/注册", "手机号登录", "抖音号登录")
+    return any(m in body for m in markers)
+
+
+_WORKLIST_READY_MARKERS = (
+    "作品管理", "内容管理", "发布作品", "作品", "扫码登录", "验证码登录", "登录/注册", "手机号登录", "抖音号登录",
+)
+
+
+def _api_error(js: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(js, dict):
+        return {}
+    out = {}
+    for key in ("status_code", "status_msg", "error_code", "error_msg", "code", "message", "msg"):
+        value = js.get(key)
+        if value not in (None, "", 0, "0"):
+            out[key] = value
+    return out
+
+
+def _worklist_page_meta(pn: int, obj: dict[str, Any], js: dict[str, Any], aw: list) -> dict[str, Any]:
+    meta: dict[str, Any] = {
+        "pn": pn,
+        "status": obj.get("status"),
+        "count": len(aw),
+        "has_more": js.get("has_more"),
+    }
+    if obj.get("textPrefix"):
+        meta["textPrefix"] = obj["textPrefix"]
+    api_error = _api_error(js)
+    if api_error:
+        meta["api_error"] = api_error
+    return meta
+
+
+def _worklist_likely_login_required(landing_body: str, pages_meta: list[dict[str, Any]]) -> bool:
+    if _looks_like_login_page(landing_body):
+        return True
+    for page in pages_meta:
+        err = page.get("api_error") or {}
+        code = err.get("status_code") or err.get("error_code") or err.get("code")
+        msg = " ".join(str(err.get(k) or "") for k in ("status_msg", "error_msg", "message", "msg"))
+        if str(code) == "8" or any(x in msg.lower() for x in ("login", "登录", "not login")):
+            return True
+    return False
+
+
 def _normalize_aweme(a: dict[str, Any]) -> dict[str, Any]:
     stat = a.get("Statistics") or a.get("statistics") or {}
     item = {
@@ -263,12 +349,13 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
     async_playwright = _import_playwright()
     all_items: list[dict[str, Any]] = []
     pages_meta: list[dict[str, Any]] = []
+    landing_body = ""
     async with async_playwright() as p, _browser(p, chromium) as browser:
         ctx = await browser.new_context(storage_state=str(state_path), **_CTX)
         page = await ctx.new_page()
         await page.goto("https://creator.douyin.com/creator-micro/content/manage",
                         wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(5000)
+        landing_body = await _body_text_with_markers(page, _WORKLIST_READY_MARKERS, timeout_ms=10000)
         cursor = 0
         for pn in range(1, max_pages + 1):
             url = ("/janus/douyin/creator/pc/work_list?scene=star_atlas"
@@ -282,8 +369,7 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
                 }""", url)
             js = obj.get("json") or {}
             aw = js.get("aweme_list") or []
-            pages_meta.append({"pn": pn, "status": obj.get("status"), "count": len(aw),
-                               "has_more": js.get("has_more")})
+            pages_meta.append(_worklist_page_meta(pn, obj, js, aw))
             all_items.extend(aw)
             nxt = js.get("max_cursor") or js.get("cursor")
             if not aw or not js.get("has_more") or nxt in (None, "", cursor):
@@ -322,6 +408,11 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
     }
     if not items_c:
         result["warning"] = "no works returned — storage state may be expired; re-run login/import-cookies"
+        result["diagnostics"] = {
+            "landing_on_login_page": _looks_like_login_page(landing_body),
+            "likely_login_required": _worklist_likely_login_required(landing_body, pages_meta),
+            "pages": pages_meta,
+        }
     jp = raw / f"douyin-worklist-{days or 'all'}d-{stamp}.json"
     mp = processed / f"douyin-worklist-{days or 'all'}d-{stamp}.md"
     jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -416,8 +507,7 @@ async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str
         ctx = await browser.new_context(storage_state=str(state_path), **_CTX)
         page = await ctx.new_page()
         await page.goto("https://creator.douyin.com/creator-micro/data-center/content",
-                        wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(4000)
+                        wait_until="domcontentloaded", timeout=60000)
         try:
             await page.locator("text=投稿列表").first.click(timeout=8000)
         except Exception as exc:
@@ -426,7 +516,7 @@ async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str
                 "data-center. If logged in, update to the latest release / report upstream "
                 "(see AGENTS.md 'Staying current')."
             ) from exc
-        await page.wait_for_timeout(5000)
+        await _wait_for_selector_or_short_fallback(page, "td, th", timeout_ms=10000)
 
         # 投稿列表 has NO pager — it lazy-loads rows on WINDOW scroll, bounded by its
         # 发布时间 filter. Scroll until the rendered cell count stops growing, then
@@ -535,7 +625,7 @@ async def _comments(ws, account, aweme_id, state_path, max_pages, chromium) -> d
         page.on("response", on_response)
         await page.goto(f"https://www.douyin.com/video/{aweme_id}",
                         wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(5000)
+        await _body_text(page, timeout_ms=10000)
         # Douyin's comment-panel class names rotate; mouse-wheel + scrolling the
         # tallest scrollable element survives DOM churn better than CSS selectors.
         await page.mouse.move(1100, 500)
