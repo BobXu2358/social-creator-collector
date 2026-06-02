@@ -147,13 +147,24 @@ def check_cookies(*, path: Path) -> dict[str, Any]:
     names = {str(c.get("name", "")) for c in cookies if isinstance(c, dict)}
     important = [n for n in ("sessionid", "sessionid_ss", "sid_guard", "uid_tt", "uid_tt_ss",
                              "passport_csrf_token") if n in names]
+    douyin_cookie_count = sum(
+        1
+        for c in cookies
+        if isinstance(c, dict) and _is_douyin_cookie_domain(str(c.get("domain", "")))
+    )
     return {
         "ok": True,
         "path": str(path),
         "cookie_count": len(cookies),
-        "domains": sorted({str(c.get("domain", "")) for c in cookies if isinstance(c, dict)}),
+        "douyin_domain_cookie_count": douyin_cookie_count,
+        "other_domain_cookie_count": len(cookies) - douyin_cookie_count,
         "important_names_present": important,
     }
+
+
+def _is_douyin_cookie_domain(domain: str) -> bool:
+    host = domain.lstrip(".").lower()
+    return host == "douyin.com" or host.endswith(".douyin.com") or host == "iesdouyin.com" or host.endswith(".iesdouyin.com")
 
 
 def import_cookies(*, cookies_path: Path, state_path: Path, chromium: str | None,
@@ -161,32 +172,115 @@ def import_cookies(*, cookies_path: Path, state_path: Path, chromium: str | None
     return asyncio.run(_import_cookies(cookies_path, state_path, chromium, nickname, douyin_id))
 
 
+_IMPORT_SUCCESS_MARKERS = (
+    "创作者服务中心", "创作者中心", "作品管理", "内容管理", "数据中心", "发布作品",
+)
+
+
+async def _probe_creator_worklist(page) -> dict[str, Any]:
+    url = ("/janus/douyin/creator/pc/work_list?scene=star_atlas"
+           "&device_platform=android&aid=1128&status=0&count=1&max_cursor=0")
+    try:
+        return await page.evaluate(
+            """async (url) => {
+                const r = await fetch(url, {credentials:'same-origin'});
+                const t = await r.text();
+                try { return {status:r.status, json:JSON.parse(t)}; }
+                catch(e) { return {status:r.status, textPrefix:t.slice(0,200)}; }
+            }""", url)
+    except Exception:
+        return {"error": "fetch_failed"}
+
+
+def _api_probe_ok(probe: dict[str, Any]) -> bool:
+    try:
+        status_ok = int(probe.get("status", 0)) < 400
+    except Exception:
+        status_ok = False
+    js = probe.get("json")
+    return (
+        status_ok
+        and isinstance(js, dict)
+        and not _api_error(js)
+        and any(k in js for k in ("aweme_list", "has_more", "max_cursor", "cursor"))
+    )
+
+
+def _import_cookie_verification(
+    body: str,
+    probe: dict[str, Any],
+    *,
+    nickname: str | None,
+    douyin_id: str | None,
+) -> dict[str, Any]:
+    api_error = _api_error(probe.get("json") or {})
+    out = {
+        "ok": False,
+        "login_page_seen": _looks_like_login_page(body),
+        "creator_marker_seen": any(marker in body for marker in _IMPORT_SUCCESS_MARKERS),
+        "api_ok": _api_probe_ok(probe),
+        "api_status": probe.get("status"),
+        "api_error": api_error,
+        "nickname_seen": bool(nickname and nickname in body),
+        "douyin_id_seen": bool(douyin_id and douyin_id in body),
+    }
+    out["ok"] = (
+        not out["login_page_seen"]
+        and (
+            out["creator_marker_seen"]
+            or out["api_ok"]
+            or out["nickname_seen"]
+            or out["douyin_id_seen"]
+        )
+    )
+    return out
+
+
 async def _import_cookies(cookies_path, state_path, chromium, nickname, douyin_id) -> dict[str, Any]:
     cookies = _load_cookie_list(cookies_path)
     state_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_state_path = state_path.with_name(f".{state_path.name}.tmp")
+    if tmp_state_path.exists():
+        tmp_state_path.unlink()
+    verification: dict[str, Any] = {}
     async_playwright = _import_playwright()
-    async with async_playwright() as p, _browser(p, chromium) as browser:
-        ctx = await browser.new_context(**_CTX)
-        await ctx.add_cookies([_normalize_cookie(c) for c in cookies])
-        page = await ctx.new_page()
-        await page.goto("https://creator.douyin.com/creator-micro/home",
-                        wait_until="domcontentloaded", timeout=60000)
-        body = await _body_text(page, timeout_ms=12000)
-        await ctx.storage_state(path=str(state_path))
-    _chmod_600(state_path)
-    on_login_page = _looks_like_login_page(body)
-    if on_login_page:
-        raise CollectorError(
-            "Douyin still on a login page after importing cookies — the export is stale. "
-            "Re-export from a freshly logged-in creator.douyin.com session."
-        )
+    try:
+        async with async_playwright() as p, _browser(p, chromium) as browser:
+            ctx = await browser.new_context(**_CTX)
+            await ctx.add_cookies([_normalize_cookie(c) for c in cookies])
+            page = await ctx.new_page()
+            await page.goto("https://creator.douyin.com/creator-micro/home",
+                            wait_until="domcontentloaded", timeout=60000)
+            body = await _body_text(page, timeout_ms=12000)
+            probe = await _probe_creator_worklist(page)
+            verification = _import_cookie_verification(
+                body, probe, nickname=nickname, douyin_id=douyin_id,
+            )
+            if not verification["ok"]:
+                if verification["login_page_seen"]:
+                    msg = (
+                        "Douyin still on a login page after importing cookies — the export is stale. "
+                        "Re-export from a freshly logged-in creator.douyin.com session."
+                    )
+                else:
+                    msg = (
+                        "Douyin cookie import did not produce a positive logged-in verification "
+                        "(no creator marker/account hint/API success). Re-export cookies from "
+                        "creator.douyin.com, or use QR login."
+                    )
+                raise CollectorError(msg)
+            await ctx.storage_state(path=str(tmp_state_path))
+        _chmod_600(tmp_state_path)
+        tmp_state_path.replace(state_path)
+        _chmod_600(state_path)
+    except Exception:
+        if tmp_state_path.exists():
+            tmp_state_path.unlink()
+        raise
     return {
         "ok": True,
         "storage_state": str(state_path),
-        "account_hints": {
-            "nickname_seen": bool(nickname and nickname in body),
-            "douyin_id_seen": bool(douyin_id and douyin_id in body),
-        },
+        "verification": verification,
     }
 
 
@@ -585,6 +679,14 @@ def _parse_int(s: Any) -> int | None:
 
 # ── comments ─────────────────────────────────────────────────────────────
 
+def _comments_no_api_diagnostics(page_body: str, pages_seen: int) -> dict[str, Any]:
+    return {
+        "api_pages_intercepted": pages_seen,
+        "comment_api_seen": pages_seen > 0,
+        "landing_on_login_page": _looks_like_login_page(page_body),
+    }
+
+
 def comments(*, ws: Path, account: str, aweme_id: str, state_path: Path, max_pages: int,
              chromium: str | None) -> dict[str, Any]:
     return asyncio.run(_comments(ws, account, aweme_id, state_path, max_pages, chromium))
@@ -596,6 +698,7 @@ async def _comments(ws, account, aweme_id, state_path, max_pages, chromium) -> d
     async_playwright = _import_playwright()
     collected: dict[Any, dict[str, Any]] = {}
     pages_seen = 0
+    landing_body = ""
     async with async_playwright() as p, _browser(p, chromium) as browser:
         ctx = await browser.new_context(storage_state=str(state_path), **_CTX)
         page = await ctx.new_page()
@@ -625,7 +728,7 @@ async def _comments(ws, account, aweme_id, state_path, max_pages, chromium) -> d
         page.on("response", on_response)
         await page.goto(f"https://www.douyin.com/video/{aweme_id}",
                         wait_until="domcontentloaded", timeout=60000)
-        await _body_text(page, timeout_ms=10000)
+        landing_body = await _body_text(page, timeout_ms=10000)
         # Douyin's comment-panel class names rotate; mouse-wheel + scrolling the
         # tallest scrollable element survives DOM churn better than CSS selectors.
         await page.mouse.move(1100, 500)
@@ -660,6 +763,15 @@ async def _comments(ws, account, aweme_id, state_path, max_pages, chromium) -> d
         "comment_count": len(collected), "api_pages_intercepted": pages_seen,
         "comments": sorted(collected.values(), key=lambda c: -(c.get("digg_count") or 0)),
     }
+    if pages_seen == 0:
+        result["warning"] = (
+            "no Douyin comment API responses were intercepted — login may be expired, "
+            "the video may be unavailable, or Douyin changed the comment loading flow"
+        )
+        result["diagnostics"] = _comments_no_api_diagnostics(landing_body, pages_seen)
     jp = raw / f"douyin-comments-{aweme_id}-{stamp}.json"
     jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"ok": True, "json": str(jp), "aweme_id": aweme_id, "comments": len(collected)}
+    summary = {"ok": True, "json": str(jp), "aweme_id": aweme_id, "comments": len(collected)}
+    if pages_seen == 0:
+        summary["warning"] = result["warning"]
+    return summary
