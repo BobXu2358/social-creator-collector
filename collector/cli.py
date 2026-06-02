@@ -135,6 +135,11 @@ def _build_parser() -> argparse.ArgumentParser:
     b_sum.set_defaults(func=lambda a: bilibili.summary(
         ws=_ws(a), account=a.account, credential_path=_bili_credential(a), days=a.days))
 
+    b_src = bili.add_parser("fan-source", parents=[common], help="fan source distribution")
+    b_src.add_argument("--credential", default="")
+    b_src.set_defaults(func=lambda a: bilibili.fan_source(
+        ws=_ws(a), account=a.account, credential_path=_bili_credential(a)))
+
     b_cmt = bili.add_parser("comments", parents=[common], help="collect video comments")
     b_cmt.add_argument("--credential", default="")
     src = b_cmt.add_mutually_exclusive_group(required=True)

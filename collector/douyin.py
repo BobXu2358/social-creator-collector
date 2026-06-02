@@ -433,13 +433,28 @@ def _counts_by_date(block: dict[str, Any]) -> dict[str, int | None]:
     return out
 
 
+_OVERVIEW_RELATED_SERIES = {
+    "cancel_fans": ("unfollow_count", "unfollows"),
+    "profile": ("profile_views", "profile views"),
+    "account_search": ("account_searches", "account searches"),
+    "post_search": ("post_searches", "post searches"),
+    "play": ("plays", "plays"),
+    "fans": ("follower_plays", "follower plays"),
+    "digg": ("likes", "likes"),
+    "comment": ("comments", "comments"),
+    "share": ("shares", "shares"),
+}
+
+
 def _douyin_fan_trend_rows(js: dict[str, Any], account: str, captured_at: str) -> list[dict[str, Any]]:
     data = js.get("data") if isinstance(js, dict) else {}
     if not isinstance(data, dict):
         return []
     new_fans = data.get("new_fans") or {}
-    fan_counts = _counts_by_date(data.get("fans") or {})
-    cancel_counts = _counts_by_date(data.get("cancel_fans") or {})
+    related = {
+        out_key: _counts_by_date(data.get(api_key) or {})
+        for api_key, (out_key, _label) in _OVERVIEW_RELATED_SERIES.items()
+    }
     option_list = new_fans.get("option_list") if isinstance(new_fans, dict) else []
     if not isinstance(option_list, list):
         return []
@@ -454,16 +469,21 @@ def _douyin_fan_trend_rows(js: dict[str, Any], account: str, captured_at: str) -
             platform="douyin", account=account, date=str(row["date"]),
             fan_inc=fan_inc, captured_at=captured_at,
         )
-        fan_count = fan_counts.get(str(row["date"]))
-        cancel_count = cancel_counts.get(str(row["date"]))
-        if fan_count is not None:
-            item["fan_count"] = fan_count
-        if cancel_count is not None:
-            item["unfollow_count"] = cancel_count
+        for out_key, by_date in related.items():
+            value = by_date.get(str(row["date"]))
+            if value is not None:
+                item[out_key] = value
         if row.get("last_day_incr_rate") not in (None, ""):
-            item["last_day_incr_rate"] = row["last_day_incr_rate"]
+            item["fan_inc_last_day_incr_rate"] = row["last_day_incr_rate"]
         rows.append(item)
     return rows
+
+
+def _douyin_overview_metric_labels() -> dict[str, str]:
+    return {
+        "fan_inc": "daily net new fans",
+        **{out_key: label for _api_key, (out_key, label) in _OVERVIEW_RELATED_SERIES.items()},
+    }
 
 
 def fan_trend(*, ws: Path, account: str, state_path: Path, days: int,
@@ -511,6 +531,7 @@ async def _fan_trend(ws, account, state_path, days, chromium) -> dict[str, Any]:
         "source": "Douyin creator center /aweme/janus/creator/data/overview/all",
         "captured_at": captured,
         "range": {"start": start, "end": end, "days": days, "last_days_type": last_days_type},
+        "metric_labels": _douyin_overview_metric_labels(),
         "fan_total": sum(r["fan_inc"] for r in rows),
         "fan_trend": rows,
     }
@@ -520,11 +541,13 @@ async def _fan_trend(ws, account, state_path, days, chromium) -> dict[str, Any]:
     lines = [f"# {account} Douyin fan trend ({days} days)", "",
              f"Range: {start} -> {end}",
              f"Fan total: {result['fan_total']:,}", "",
-             "| Date | Net fans | Fan count | Unfollows |",
-             "|---|---:|---:|---:|"]
+             "| Date | Net fans | Unfollows | Profile views | Account searches | Post searches | Plays | Follower plays |",
+             "|---|---:|---:|---:|---:|---:|---:|---:|"]
     for r in rows:
-        lines.append(f"| {r['date']} | {_fmt(r['fan_inc'])} | {_fmt(r.get('fan_count'))} | "
-                     f"{_fmt(r.get('unfollow_count'))} |")
+        lines.append(f"| {r['date']} | {_fmt(r['fan_inc'])} | {_fmt(r.get('unfollow_count'))} | "
+                     f"{_fmt(r.get('profile_views'))} | {_fmt(r.get('account_searches'))} | "
+                     f"{_fmt(r.get('post_searches'))} | {_fmt(r.get('plays'))} | "
+                     f"{_fmt(r.get('follower_plays'))} |")
     mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"ok": True, "json": str(jp), "markdown": str(mp),
             "fan_total": result["fan_total"], "rows": len(rows)}

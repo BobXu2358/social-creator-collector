@@ -5,7 +5,7 @@ Why no browser here: the three creator cookies (``SESSDATA``, ``bili_jct``,
 comment APIs, so Bilibili stays a lightweight httpx path. Douyin can't — see
 ``douyin.py``.
 
-Commands: probe, summary, comments, danmaku.
+Commands: probe, summary, fan-source, comments, danmaku.
 """
 from __future__ import annotations
 
@@ -309,6 +309,70 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
 def _days(n: int):
     from datetime import timedelta
     return timedelta(days=n)
+
+
+# ── fan sources ──────────────────────────────────────────────────────────
+
+_FAN_SOURCE_LABELS = {
+    "video": "video",
+    "article": "article",
+    "live": "live",
+    "space": "space",
+    "search": "search",
+    "recommend": "recommend",
+    "other": "other",
+}
+
+
+def _fan_source_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+    total = sum(int(v or 0) for v in data.values() if isinstance(v, (int, float)))
+    rows = []
+    for key, value in sorted(data.items(), key=lambda item: -(int(item[1] or 0) if isinstance(item[1], (int, float)) else 0)):
+        if not isinstance(value, (int, float)):
+            continue
+        count = int(value)
+        rows.append({
+            "source_key": key,
+            "source_label": _FAN_SOURCE_LABELS.get(key, key),
+            "count": count,
+            "share_pct": round(count / total * 100, 2) if total else 0.0,
+        })
+    return rows
+
+
+def fan_source(*, ws: Path, account: str, credential_path: Path) -> dict[str, Any]:
+    creds = load_credentials(credential_path)
+    referer = "https://member.bilibili.com/platform/data-up/fans-analysis"
+    with _client(cookie_header(creds), referer) as c:
+        data = _get_json(c, "https://member.bilibili.com/x/web/data/v2/fans/stat/source").get("data") or {}
+    if not isinstance(data, dict) or not data:
+        raise CollectorError("no Bilibili fan source data returned (cookie may lack creator access)")
+
+    rows = _fan_source_rows(data)
+    captured = datetime.now(TZ).isoformat()
+    raw, processed = output_dirs(ws, account, "bilibili")
+    stamp = _stamp()
+    result = {
+        "schema_version": schema.SCHEMA_VERSION,
+        "account": account,
+        "platform": "bilibili",
+        "source": "Bilibili creator-center /x/web/data/v2/fans/stat/source",
+        "captured_at": captured,
+        "source_total": sum(r["count"] for r in rows),
+        "sources": rows,
+    }
+    jp = raw / f"bilibili-fan-source-{stamp}.json"
+    mp = processed / f"bilibili-fan-source-{stamp}.md"
+    jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    lines = [f"# {account} Bilibili fan source", "",
+             f"Captured at: {captured}",
+             f"Total: {result['source_total']:,}", "",
+             "| Source | Count | Share |", "|---|---:|---:|"]
+    for r in rows:
+        lines.append(f"| {r['source_label']} | {r['count']:,} | {r['share_pct']:.2f}% |")
+    mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"ok": True, "json": str(jp), "markdown": str(mp),
+            "source_total": result["source_total"], "sources": len(rows)}
 
 
 # ── comments ─────────────────────────────────────────────────────────────

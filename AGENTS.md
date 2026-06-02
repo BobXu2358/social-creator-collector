@@ -105,13 +105,14 @@ python -m collector <group> <action> --account <account> [options]
 | `bilibili login --account X` | QR scan login (headed browser) → credential file |
 | `bilibili probe --account X` | verify B站 login + identity (fails loud if cookie expired) |
 | `bilibili summary --account X --days 30` | fan trend + per-video play/fans/coin/reply/likes |
+| `bilibili fan-source --account X` | fan source distribution (video/search/space/etc.) |
 | `bilibili comments --account X --bvid BVxxx` | collect top-level video comments |
 | `bilibili danmaku --account X --bvid BVxxx` | fetch danmaku + density-peak analysis |
 | `douyin login --account X` | QR scan login (headed browser) → storage state |
 | `douyin check-cookies --account X` | validate a Cookie-Editor export's structure |
 | `douyin import-cookies --account X` | cookies → Playwright storage state + verify login |
 | `douyin worklist --account X --days 30` | creator-center work list + basic metrics |
-| `douyin fan-trend --account X --days 30` | account-level daily net fan trend |
+| `douyin fan-trend --account X --days 30` | daily net fans + related overview metrics |
 | `douyin fan-growth --account X` | **per-video 粉丝增量** from 投稿列表 DOM |
 | `douyin comments --account X --aweme-id ID` | collect video comments |
 
@@ -136,7 +137,12 @@ downstream tools against this shape, not against one command's incidental JSON.
   redesigns the table (rather than silently returning a wrong column).
 - **Douyin account-level daily net fans do have a creator-center overview API.**
   `douyin fan-trend --days 30` reads `new_fans.option_list` from that API; this is the
-  right input for campaign lift analysis. It is not a local snapshot system.
+  right input for campaign lift analysis. It also carries related daily overview metrics
+  (profile visits, account/work searches, plays, follower plays, likes/comments/shares,
+  unfollows). It is not a local snapshot system.
+- **Bilibili fan source is a direct creator-center source split.** `bilibili fan-source`
+  emits counts for buckets like video/search/space/recommend/live/other; use it as a
+  supporting input next to `summary`'s daily fan trend and per-video fan attribution.
 - **B站 comments need a login cookie.** The anonymous/`x/v2/reply/wbi/main` endpoints
   return ~3 hot comments or trigger `412` — the collector uses `x/v2/reply/main` with cookie.
 - **Cookie expiry is the usual failure.** If a command returns empty or a login warning,
