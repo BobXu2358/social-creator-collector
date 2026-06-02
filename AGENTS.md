@@ -10,6 +10,42 @@ You set it up and run it safely — never paste secrets into chat, never print c
 - **One namespace per account**: everything lives under `social/<account>/` and `social/_secrets/<account>/`.
 - **`_secrets/` never enters memory, indexing, or any shared output.** It is gitignored — keep it that way.
 
+## Read-only discovery fallback
+
+Use the supported `collector` commands first. If they do not expose enough data for
+the user's analysis, you may do **read-only discovery** as a temporary fallback:
+
+- Stay on official creator-center domains only:
+  - Bilibili: `member.bilibili.com`, `api.bilibili.com`
+  - Douyin: `creator.douyin.com`, `www.douyin.com`
+- Only inspect pages and GET/fetch already-used creator data APIs. Do not post, edit,
+  delete, publish, comment, DM, follow, change settings, export private account lists,
+  or trigger any mutation.
+- Do not modify this repo, the installed package, or core collector code during a
+  user task. Discovery results are for the current analysis only.
+- Do not print or save raw cookies, tokens, `storage_state`, `msToken`, `a_bogus`,
+  auth headers, full signed query strings, request bodies, private user lists, or
+  raw comment/message dumps.
+- Keep discovery bounded: a small number of pages/endpoints, short timeouts, and no
+  broad crawling. Prefer field names, counts, and schema summaries over raw payloads.
+- Clearly label any discovered field whose meaning is an inference, not a documented
+  fact. If a field is ambiguous, say so instead of building a confident conclusion.
+
+After completing the user's task, if discovery found data that looks broadly useful
+or missing from core, open an upstream issue instead of patching locally. Include:
+
+- the business question that needed the data;
+- platform, account namespace (not platform account id unless needed), and supported
+  commands that were insufficient;
+- sanitized endpoint paths (drop tokens/signatures/query secrets);
+- a redacted field-shape summary and example counts, not raw sensitive values;
+- inferred field meanings and uncertainty;
+- whether it reproduced more than once;
+- the exact collector version/commit.
+
+Use the repository's "Discovery finding" issue template when available. The maintainer
+decides whether the data should become a supported core command.
+
 ## Setup
 
 ```bash
@@ -105,12 +141,14 @@ python -m collector <group> <action> --account <account> [options]
 | `bilibili login --account X` | QR scan login (headed browser) → credential file |
 | `bilibili probe --account X` | verify B站 login + identity (fails loud if cookie expired) |
 | `bilibili summary --account X --days 30` | fan trend + per-video play/fans/coin/reply/likes |
+| `bilibili fan-source --account X` | fan source distribution (video/search/space/etc.) |
 | `bilibili comments --account X --bvid BVxxx` | collect top-level video comments |
 | `bilibili danmaku --account X --bvid BVxxx` | fetch danmaku + density-peak analysis |
 | `douyin login --account X` | QR scan login (headed browser) → storage state |
 | `douyin check-cookies --account X` | validate a Cookie-Editor export's structure |
 | `douyin import-cookies --account X` | cookies → Playwright storage state + verify login |
 | `douyin worklist --account X --days 30` | creator-center work list + basic metrics |
+| `douyin fan-trend --account X --days 30` | daily net fans + related overview metrics |
 | `douyin fan-growth --account X` | **per-video 粉丝增量** from 投稿列表 DOM |
 | `douyin comments --account X --aweme-id ID` | collect video comments |
 
@@ -133,6 +171,14 @@ downstream tools against this shape, not against one command's incidental JSON.
 - **Douyin per-video fan growth has no API** — it only exists in the 投稿列表 table DOM.
   `douyin fan-growth` locates the 粉丝增量 column by header text and fails loud if Douyin
   redesigns the table (rather than silently returning a wrong column).
+- **Douyin account-level daily net fans do have a creator-center overview API.**
+  `douyin fan-trend --days 30` reads `new_fans.option_list` from that API; this is the
+  right input for campaign lift analysis. It also carries related daily overview metrics
+  (profile visits, account/work searches, plays, follower plays, likes/comments/shares,
+  unfollows). It is not a local snapshot system.
+- **Bilibili fan source is a direct creator-center source split.** `bilibili fan-source`
+  emits counts for buckets like video/search/space/recommend/live/other; use it as a
+  supporting input next to `summary`'s daily fan trend and per-video fan attribution.
 - **B站 comments need a login cookie.** The anonymous/`x/v2/reply/wbi/main` endpoints
   return ~3 hot comments or trigger `412` — the collector uses `x/v2/reply/main` with cookie.
 - **Cookie expiry is the usual failure.** If a command returns empty or a login warning,

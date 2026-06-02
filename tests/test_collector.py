@@ -254,6 +254,13 @@ class PureParsers(unittest.TestCase):
         self.assertIsNone(bilibili._date_from_epoch("bad"))
         self.assertIsNotNone(bilibili._date_from_epoch(1716000000))
 
+    def test_bilibili_fan_source_rows(self):
+        rows = bilibili._fan_source_rows({"video": 60, "search": 30, "other": 10, "bad": "x"})
+        self.assertEqual([r["source_key"] for r in rows], ["video", "search", "other"])
+        self.assertEqual(rows[0]["source_label"], "video")
+        self.assertEqual(rows[0]["count"], 60)
+        self.assertEqual(rows[0]["share_pct"], 60.0)
+
     def test_parse_fan_table_locates_column_by_header(self):
         table = [
             ["作品", "播放量", "粉丝增量", "评论"],
@@ -300,6 +307,68 @@ class PureParsers(unittest.TestCase):
             {"api_error": {"status_code": 8}},
         ]))
         self.assertFalse(douyin._worklist_likely_login_required("", [meta]))
+
+    def test_douyin_fan_trend_rows(self):
+        captured = "2026-06-02T12:00:00+08:00"
+        payload = {
+            "data": {
+                "new_fans": {
+                    "option_list": [
+                        {"date": "2026-05-31", "count": "1,234", "last_day_incr_rate": "+10%"},
+                        {"date": "2026-06-01", "count": "2883"},
+                    ],
+                },
+                "fans": {
+                    "option_list": [
+                        {"date": "2026-05-31", "count": "83,000"},
+                        {"date": "2026-06-01", "count": "85,883"},
+                    ],
+                },
+                "profile": {
+                    "option_list": [
+                        {"date": "2026-05-31", "count": "1,111"},
+                        {"date": "2026-06-01", "count": "2,222"},
+                    ],
+                },
+                "account_search": {
+                    "option_list": [
+                        {"date": "2026-05-31", "count": "33"},
+                        {"date": "2026-06-01", "count": "44"},
+                    ],
+                },
+                "post_search": {
+                    "option_list": [
+                        {"date": "2026-05-31", "count": "55"},
+                        {"date": "2026-06-01", "count": "66"},
+                    ],
+                },
+                "cancel_fans": {
+                    "option_list": [
+                        {"date": "2026-05-31", "count": "12"},
+                        {"date": "2026-06-01", "count": "95"},
+                    ],
+                },
+            },
+        }
+        rows = douyin._douyin_fan_trend_rows(payload, "xgame", captured)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["schema_version"], schema.SCHEMA_VERSION)
+        self.assertEqual(rows[0]["platform"], "douyin")
+        self.assertEqual(rows[0]["fan_inc"], 1234)
+        self.assertEqual(rows[0]["follower_plays"], 83000)
+        self.assertEqual(rows[0]["profile_views"], 1111)
+        self.assertEqual(rows[0]["account_searches"], 33)
+        self.assertEqual(rows[0]["post_searches"], 55)
+        self.assertEqual(rows[0]["unfollow_count"], 12)
+        self.assertEqual(rows[0]["fan_inc_last_day_incr_rate"], "+10%")
+        self.assertEqual(rows[1]["fan_inc"], 2883)
+
+    def test_douyin_fan_trend_days_type(self):
+        self.assertEqual(douyin._overview_days_type(7), 1)
+        self.assertEqual(douyin._overview_days_type(15), 2)
+        self.assertEqual(douyin._overview_days_type(30), 3)
+        with self.assertRaises(CollectorError):
+            douyin._overview_days_type(90)
 
     def test_comments_no_api_diagnostics(self):
         diag = douyin._comments_no_api_diagnostics("扫码登录", 0)

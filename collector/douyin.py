@@ -8,7 +8,7 @@ Why a browser is unavoidable here:
   * per-video fan growth (粉丝增量) has no API at all — it exists only in the DOM
     of the 投稿列表 table, so we scrape it.
 
-Commands: check-cookies, import-cookies, worklist, fan-growth, comments.
+Commands: check-cookies, import-cookies, worklist, fan-trend, fan-growth, comments.
 """
 from __future__ import annotations
 
@@ -409,6 +409,148 @@ def _worklist_likely_login_required(landing_body: str, pages_meta: list[dict[str
         if str(code) == "8" or any(x in msg.lower() for x in ("login", "登录", "not login")):
             return True
     return False
+
+
+_OVERVIEW_DAYS_TYPE = {7: 1, 15: 2, 30: 3}
+
+
+def _overview_days_type(days: int) -> int:
+    try:
+        return _OVERVIEW_DAYS_TYPE[int(days)]
+    except Exception as exc:
+        raise CollectorError("Douyin fan-trend supports --days 7, 15, or 30") from exc
+
+
+def _counts_by_date(block: dict[str, Any]) -> dict[str, int | None]:
+    rows = block.get("option_list") if isinstance(block, dict) else []
+    if not isinstance(rows, list):
+        return {}
+    out: dict[str, int | None] = {}
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("date"):
+            continue
+        out[str(row["date"])] = _parse_int(row.get("count"))
+    return out
+
+
+_OVERVIEW_RELATED_SERIES = {
+    "cancel_fans": ("unfollow_count", "unfollows"),
+    "profile": ("profile_views", "profile views"),
+    "account_search": ("account_searches", "account searches"),
+    "post_search": ("post_searches", "post searches"),
+    "play": ("plays", "plays"),
+    "fans": ("follower_plays", "follower plays"),
+    "digg": ("likes", "likes"),
+    "comment": ("comments", "comments"),
+    "share": ("shares", "shares"),
+}
+
+
+def _douyin_fan_trend_rows(js: dict[str, Any], account: str, captured_at: str) -> list[dict[str, Any]]:
+    data = js.get("data") if isinstance(js, dict) else {}
+    if not isinstance(data, dict):
+        return []
+    new_fans = data.get("new_fans") or {}
+    related = {
+        out_key: _counts_by_date(data.get(api_key) or {})
+        for api_key, (out_key, _label) in _OVERVIEW_RELATED_SERIES.items()
+    }
+    option_list = new_fans.get("option_list") if isinstance(new_fans, dict) else []
+    if not isinstance(option_list, list):
+        return []
+    rows = []
+    for row in option_list:
+        if not isinstance(row, dict) or not row.get("date"):
+            continue
+        fan_inc = _parse_int(row.get("count"))
+        if fan_inc is None:
+            continue
+        item = schema.fan_trend_row(
+            platform="douyin", account=account, date=str(row["date"]),
+            fan_inc=fan_inc, captured_at=captured_at,
+        )
+        for out_key, by_date in related.items():
+            value = by_date.get(str(row["date"]))
+            if value is not None:
+                item[out_key] = value
+        if row.get("last_day_incr_rate") not in (None, ""):
+            item["fan_inc_last_day_incr_rate"] = row["last_day_incr_rate"]
+        rows.append(item)
+    return rows
+
+
+def _douyin_overview_metric_labels() -> dict[str, str]:
+    return {
+        "fan_inc": "daily net new fans",
+        **{out_key: label for _api_key, (out_key, label) in _OVERVIEW_RELATED_SERIES.items()},
+    }
+
+
+def fan_trend(*, ws: Path, account: str, state_path: Path, days: int,
+              chromium: str | None) -> dict[str, Any]:
+    return asyncio.run(_fan_trend(ws, account, state_path, days, chromium))
+
+
+async def _fan_trend(ws, account, state_path, days, chromium) -> dict[str, Any]:
+    if not state_path.exists():
+        raise CollectorError(f"missing Douyin storage state; run login/import-cookies first: {state_path}")
+    last_days_type = _overview_days_type(days)
+    async_playwright = _import_playwright()
+    async with async_playwright() as p, _browser(p, chromium) as browser:
+        ctx = await browser.new_context(storage_state=str(state_path), **_CTX)
+        page = await ctx.new_page()
+        await page.goto("https://creator.douyin.com/creator-micro/home",
+                        wait_until="domcontentloaded", timeout=60000)
+        await _body_text_with_markers(
+            page, ("净增粉丝", "数据中心", "扫码登录", "验证码登录", "登录/注册"), timeout_ms=10000,
+        )
+        obj = await page.evaluate(
+            """async (lastDaysType) => {
+                const url = `/aweme/janus/creator/data/overview/all/?last_days_type=${lastDaysType}`;
+                const r = await fetch(url, {credentials:'same-origin'});
+                const t = await r.text();
+                try { return {status:r.status, json:JSON.parse(t)}; }
+                catch(e) { return {status:r.status, textPrefix:t.slice(0,500)}; }
+            }""", last_days_type)
+
+    js = obj.get("json") or {}
+    err = _api_error(js)
+    if obj.get("status", 0) >= 400 or err:
+        raise CollectorError(f"Douyin fan-trend API error status={obj.get('status')} detail={err or obj.get('textPrefix')}")
+    captured = datetime.now(TZ).isoformat()
+    rows = _douyin_fan_trend_rows(js, account, captured)
+    if not rows:
+        raise CollectorError("no Douyin fan trend returned (storage state may be expired or creator data unavailable)")
+
+    raw, processed = output_dirs(ws, account, "douyin")
+    stamp = _stamp()
+    start, end = rows[0]["date"], rows[-1]["date"]
+    result = {
+        "schema_version": schema.SCHEMA_VERSION,
+        "account": account, "platform": "douyin",
+        "source": "Douyin creator center /aweme/janus/creator/data/overview/all",
+        "captured_at": captured,
+        "range": {"start": start, "end": end, "days": days, "last_days_type": last_days_type},
+        "metric_labels": _douyin_overview_metric_labels(),
+        "fan_total": sum(r["fan_inc"] for r in rows),
+        "fan_trend": rows,
+    }
+    jp = raw / f"douyin-fan-trend-{days}d-{stamp}.json"
+    mp = processed / f"douyin-fan-trend-{days}d-{stamp}.md"
+    jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    lines = [f"# {account} Douyin fan trend ({days} days)", "",
+             f"Range: {start} -> {end}",
+             f"Fan total: {result['fan_total']:,}", "",
+             "| Date | Net fans | Unfollows | Profile views | Account searches | Post searches | Plays | Follower plays |",
+             "|---|---:|---:|---:|---:|---:|---:|---:|"]
+    for r in rows:
+        lines.append(f"| {r['date']} | {_fmt(r['fan_inc'])} | {_fmt(r.get('unfollow_count'))} | "
+                     f"{_fmt(r.get('profile_views'))} | {_fmt(r.get('account_searches'))} | "
+                     f"{_fmt(r.get('post_searches'))} | {_fmt(r.get('plays'))} | "
+                     f"{_fmt(r.get('follower_plays'))} |")
+    mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"ok": True, "json": str(jp), "markdown": str(mp),
+            "fan_total": result["fan_total"], "rows": len(rows)}
 
 
 def _normalize_aweme(a: dict[str, Any]) -> dict[str, Any]:
