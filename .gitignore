@@ -1,4 +1,5 @@
 _secrets/
+social/_secrets/
 *.credentials.json
 *.cookies.json
 *.storage_state.json
