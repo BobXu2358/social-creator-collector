@@ -59,17 +59,41 @@ def _client(cookie: str | None = None, referer: str = "https://www.bilibili.com/
     return httpx.Client(headers=headers, timeout=30, follow_redirects=True)
 
 
-def _get_json(client: httpx.Client, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    resp = client.get(url, params=params or {})
-    resp.raise_for_status()
-    obj = resp.json()
-    code = obj.get("code")
-    if code not in (0, None):
-        # -412/-799/-352/-403 are risk-control codes; do not hammer on these.
-        raise CollectorError(
-            f"Bilibili API error code={code} message={obj.get('message')!r} url={resp.url}"
-        )
-    return obj
+# 429 + 5xx are worth a retry; other 4xx and the JSON-level risk codes are not.
+_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+def _get_json(client: httpx.Client, url: str, params: dict[str, Any] | None = None,
+              *, retries: int = 3, backoff_s: float = 0.8) -> dict[str, Any]:
+    """GET + parse Bilibili JSON, with bounded retry on *transient* failures only.
+
+    Retries network errors (timeout / reset) and 429/5xx with exponential backoff.
+    Never retries other 4xx, and never retries a JSON ``code != 0`` — those are
+    risk-control / business errors (``-412/-799/-352/-403`` …) where hammering only
+    makes things worse, so they fail loud immediately.
+    """
+    last = "no attempt made"
+    for attempt in range(retries + 1):
+        try:
+            resp = client.get(url, params=params or {})
+        except httpx.TransportError as exc:  # timeout, connection reset, DNS — transient
+            last = f"network error: {exc}"
+        else:
+            if resp.status_code in _RETRY_STATUS:
+                last = f"HTTP {resp.status_code}"
+            elif resp.status_code >= 400:        # other 4xx (412/403/404…): do NOT hammer
+                raise CollectorError(f"Bilibili HTTP {resp.status_code} url={resp.url} — not retrying")
+            else:
+                obj = resp.json()
+                code = obj.get("code")
+                if code not in (0, None):
+                    raise CollectorError(
+                        f"Bilibili API error code={code} message={obj.get('message')!r} url={resp.url}"
+                    )
+                return obj
+        if attempt < retries:
+            time.sleep(backoff_s * (2 ** attempt))
+    raise CollectorError(f"Bilibili request to {url} failed after {retries + 1} attempts ({last})")
 
 
 def _stamp() -> str:
@@ -209,7 +233,10 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
             if not items:
                 break
             for it in items:
-                pub = datetime.fromtimestamp(int(it["pubtime"]), TZ)
+                pubtime = it.get("pubtime")
+                if not pubtime:
+                    continue
+                pub = datetime.fromtimestamp(int(pubtime), TZ)
                 if start <= pub.date() <= latest:
                     stat = it.get("real_stat") or it.get("stat") or {}
                     videos.append(schema.video_row(
@@ -224,7 +251,8 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
                             "fans": int(stat.get("fans") or 0),
                             "full_play_ratio": stat.get("full_play_ratio"),
                         }))
-            if datetime.fromtimestamp(int(items[-1]["pubtime"]), TZ).date() < start:
+            last_pubtime = items[-1].get("pubtime")
+            if last_pubtime and datetime.fromtimestamp(int(last_pubtime), TZ).date() < start:
                 break
     videos.sort(key=lambda r: r["published_at"] or "", reverse=True)
 
