@@ -254,6 +254,12 @@ class PureParsers(unittest.TestCase):
         self.assertIsNone(bilibili._date_from_epoch("bad"))
         self.assertIsNotNone(bilibili._date_from_epoch(1716000000))
 
+    def test_bilibili_stat_int_falls_back_across_sources(self):
+        self.assertEqual(bilibili._stat_int({"play": "123"}, names=("play",)), 123)
+        self.assertEqual(bilibili._stat_int({"coin": ""}, {"coin": 456}, names=("coin",)), 456)
+        self.assertEqual(bilibili._stat_int({"likes": 7}, names=("like", "likes")), 7)
+        self.assertEqual(bilibili._stat_int({"coin": "bad"}, names=("coin",)), 0)
+
     def test_bilibili_fan_source_rows(self):
         rows = bilibili._fan_source_rows({"video": 60, "search": 30, "other": 10, "bad": "x"})
         self.assertEqual([r["source_key"] for r in rows], ["video", "search", "other"])
@@ -434,6 +440,16 @@ class _Resp:
 
 
 class RetryBehavior(unittest.TestCase):
+    def test_archive_compare_indexes_coin_stats_by_bvid(self):
+        client = _SeqClient([_Resp(200, {"code": 0, "data": {"list": [
+            {"bvid": "BV1", "stat": {"coin": 12, "fav": 3, "share": 4, "dm": 5}},
+            {"bvid": "", "stat": {"coin": 99}},
+        ]}})])
+        by_bvid = bilibili._archive_compare_by_bvid(client)
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(by_bvid["BV1"]["stat"]["coin"], 12)
+        self.assertNotIn("", by_bvid)
+
     def test_retries_transient_then_succeeds(self):
         client = _SeqClient([httpx.ConnectError("boom"), _Resp(503),
                              _Resp(200, {"code": 0, "data": {"ok": 1}})])

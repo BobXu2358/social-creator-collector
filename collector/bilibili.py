@@ -105,6 +105,20 @@ def _date_from_epoch(ts: Any) -> datetime | None:
         return None
 
 
+def _stat_int(*sources: dict[str, Any], names: tuple[str, ...], default: int = 0) -> int:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for name in names:
+            value = source.get(name)
+            if value not in (None, ""):
+                try:
+                    return int(value)
+                except Exception:
+                    return default
+    return default
+
+
 # ── probe ────────────────────────────────────────────────────────────────
 
 def probe(*, ws: Path, account: str, credential_path: Path) -> dict[str, Any]:
@@ -191,6 +205,16 @@ async def _login_async(credential_path: Path, chromium: str | None, timeout_s: i
 
 # ── creator-center summary (fan trend + per-video stats) ─────────────────
 
+def _archive_compare_by_bvid(client: httpx.Client, *, size: int = 50) -> dict[str, dict[str, Any]]:
+    obj = _get_json(
+        client,
+        "https://member.bilibili.com/x/web/data/archive_diagnose/compare",
+        {"size": size},
+    )
+    items = (obj.get("data") or {}).get("list") or []
+    return {str(it["bvid"]): it for it in items if isinstance(it, dict) and it.get("bvid")}
+
+
 def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict[str, Any]:
     creds = load_credentials(credential_path)
     cookie = cookie_header(creds)
@@ -230,6 +254,7 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
         )
 
         videos: list[dict[str, Any]] = []
+        compare_by_bvid = _archive_compare_by_bvid(c)
         for pn in range(1, 50):
             obj = _get_json(
                 c,
@@ -246,16 +271,20 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
                     continue
                 if start <= pub.date() <= latest:
                     stat = it.get("real_stat") or it.get("stat") or {}
+                    compare_stat = (compare_by_bvid.get(str(it.get("bvid"))) or {}).get("stat") or {}
                     videos.append(schema.video_row(
                         platform="bilibili", account=account, content_id=it.get("bvid"),
                         title=it.get("title"), published_at=pub.isoformat(), captured_at=captured,
                         source_url=f"https://www.bilibili.com/video/{it.get('bvid')}",
                         metrics={
-                            "plays": int(stat.get("play") or 0),
-                            "likes": int(stat.get("likes") or 0),
-                            "comments": int(stat.get("reply") or 0),
-                            "coins": int(stat.get("coin") or 0),
-                            "fans": int(stat.get("fans") or 0),
+                            "plays": _stat_int(stat, compare_stat, names=("play",)),
+                            "likes": _stat_int(stat, compare_stat, names=("likes", "like")),
+                            "comments": _stat_int(stat, compare_stat, names=("reply",)),
+                            "coins": _stat_int(compare_stat, stat, names=("coin",)),
+                            "fans": _stat_int(stat, compare_stat, names=("fans",)),
+                            "collects": _stat_int(compare_stat, stat, names=("fav", "favorite")),
+                            "shares": _stat_int(compare_stat, stat, names=("share",)),
+                            "danmaku": _stat_int(compare_stat, stat, names=("dm",)),
                             "full_play_ratio": stat.get("full_play_ratio"),
                         }))
             last_pubtime = items[-1].get("pubtime")
@@ -299,7 +328,8 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
         lines.append(
             f"- {(v['published_at'] or '')[:16].replace('T', ' ')} `{v['content_id']}` {v['title']} — "
             f"play {m.get('plays', 0):,}, fans {m.get('fans', 0):,}, coin {m.get('coins', 0):,}, "
-            f"reply {m.get('comments', 0):,}, likes {m.get('likes', 0):,}"
+            f"reply {m.get('comments', 0):,}, likes {m.get('likes', 0):,}, "
+            f"fav {m.get('collects', 0):,}, share {m.get('shares', 0):,}, dm {m.get('danmaku', 0):,}"
         )
     mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"ok": True, "json": str(jp), "markdown": str(mp),
