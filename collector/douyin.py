@@ -350,9 +350,38 @@ def _iso(ts: Any) -> str | None:
         return None
 
 
+def _duration_seconds(value: Any) -> float | None:
+    try:
+        duration = float(value)
+    except Exception:
+        return None
+    if duration <= 0:
+        return None
+    # work_list currently reports milliseconds; keep already-second values intact.
+    if duration > 10_000:
+        duration = duration / 1000
+    return int(duration) if duration.is_integer() else round(duration, 3)
+
+
+def _first_url(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, list):
+        for item in value:
+            found = _first_url(item)
+            if found:
+                return found
+    if isinstance(value, dict):
+        for key in ("url", "uri", "cover_url", "display_url", "origin_url", "url_list", "urlList", "UrlList"):
+            found = _first_url(value.get(key))
+            if found:
+                return found
+    return None
+
+
 def _aweme_canonical(n: dict[str, Any], account: str, captured_at: str) -> dict[str, Any]:
     """Map an internal normalized aweme to a canonical video row."""
-    return schema.video_row(
+    row = schema.video_row(
         platform="douyin", account=account, content_id=n.get("aweme_id"),
         title=n.get("title"), published_at=_iso(n.get("create_time")),
         captured_at=captured_at, source_url=n.get("url"),
@@ -361,6 +390,16 @@ def _aweme_canonical(n: dict[str, Any], account: str, captured_at: str) -> dict[
             "comments": n.get("comment"), "shares": n.get("share"),
             "collects": n.get("collect"),
         })
+    for key in ("duration_s", "cover_url", "work_type", "status", "visibility", "audit_status"):
+        if n.get(key) not in (None, ""):
+            row[key] = n[key]
+    platform_fields = {
+        "forward": n.get("forward"),
+    }
+    platform_fields = {k: v for k, v in platform_fields.items() if v not in (None, "")}
+    if platform_fields:
+        row["platform_fields"] = platform_fields
+    return row
 
 
 def _looks_like_login_page(body: str) -> bool:
@@ -555,10 +594,20 @@ async def _fan_trend(ws, account, state_path, days, chromium) -> dict[str, Any]:
 
 def _normalize_aweme(a: dict[str, Any]) -> dict[str, Any]:
     stat = a.get("Statistics") or a.get("statistics") or {}
+    video = a.get("Video") or a.get("video") or {}
     item = {
         "aweme_id": _pick(a, "AwemeId", "aweme_id", "item_id", "id"),
         "title": _pick(a, "Desc", "desc", "Title", "title") or "",
         "create_time": _pick(a, "CreateTime", "create_time"),
+        "duration_s": _duration_seconds(_pick(a, "Duration", "duration", "duration_ms", "video_duration")
+                                        or _pick(video, "Duration", "duration")),
+        "cover_url": _first_url(_pick(a, "Cover", "cover", "cover_url", "display_url")
+                                or _pick(video, "Cover", "cover", "cover_url", "display_url")),
+        "work_type": _pick(a, "AwemeType", "aweme_type", "MediaType", "media_type",
+                           "ItemType", "item_type", "ContentType", "content_type", "type"),
+        "status": _pick(a, "Status", "status", "ItemStatus", "item_status"),
+        "visibility": _pick(a, "Visibility", "visibility", "Visible", "visible", "Permission", "permission"),
+        "audit_status": _pick(a, "AuditStatus", "audit_status", "ReviewStatus", "review_status"),
     }
     item["create_time_str"] = _ts_to_str(item["create_time"])
     for out, names in {
@@ -566,6 +615,7 @@ def _normalize_aweme(a: dict[str, Any]) -> dict[str, Any]:
         "like": ["DiggCnt", "digg_count", "like_count"],
         "comment": ["CommentCnt", "comment_count"],
         "share": ["ShareCnt", "share_count"],
+        "forward": ["ForwardCnt", "forward_count", "forward"],
         "collect": ["CollectCnt", "collect_count"],
     }.items():
         item[out] = _pick(a, *names) or _pick(stat, *names)
@@ -639,6 +689,11 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
         "source": "Douyin creator center /janus/douyin/creator/pc/work_list",
         "captured_at": captured,
         "range": {"days": days, "cutoff": cutoff.isoformat() if cutoff else None},
+        "field_notes": {
+            "duration_s": "Video duration in seconds; Douyin work_list duration is normalized from milliseconds when needed.",
+            "metrics.shares": "Uses the work_list share/share_count value as the display share count.",
+            "platform_fields.forward": "Raw forward/forward_count value when present; semantics are not used as display shares.",
+        },
         "page_count": len(pages_meta), "item_count": len(items_c),
         "items": items_c, "selected_items": rows_c, "pages": pages_meta,
     }
@@ -655,13 +710,14 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
     lines = [f"# {account} Douyin worklist ({days or 'all'} days)", "",
              f"Captured at: {captured}",
              f"Items: {len(items_c)}; selected: {len(rows_c)}", "",
-             "| Time | Work ID | Title | Play | Like | Comment | Share | Collect |",
-             "|---|---|---|---:|---:|---:|---:|---:|"]
+             "| Time | Work ID | Title | Duration | Play | Like | Comment | Share | Collect |",
+             "|---|---|---|---:|---:|---:|---:|---:|---:|"]
     for r in rows_c:
         m = r["metrics"]
         title = (r.get("title") or "").replace("|", "/").replace("\n", " ")[:80]
         pub = (r.get("published_at") or "")[:19].replace("T", " ")
         lines.append(f"| {pub} | {r.get('content_id', '')} | {title} | "
+                     f"{_fmt(r.get('duration_s'))} | "
                      f"{_fmt(m.get('plays'))} | {_fmt(m.get('likes'))} | {_fmt(m.get('comments'))} | "
                      f"{_fmt(m.get('shares'))} | {_fmt(m.get('collects'))} |")
     mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -680,6 +736,8 @@ def _fmt(v: Any) -> str:
     if v in (None, ""):
         return ""
     try:
+        if isinstance(v, float) and not v.is_integer():
+            return f"{v:.3f}".rstrip("0").rstrip(".")
         return f"{int(v):,}"
     except Exception:
         return str(v)
