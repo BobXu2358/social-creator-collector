@@ -323,6 +323,17 @@ class PureParsers(unittest.TestCase):
         # no 粉丝增量 header anywhere → empty (the caller fails loud, not the parser)
         self.assertEqual(douyin._parse_fan_table([["播放量", "评论"], ["1", "2"]]), [])
 
+    def test_fan_growth_canonical_adds_fallback_join_key(self):
+        captured = "2026-06-02T12:00:00+08:00"
+        parsed = {"title": "视频一", "published": "2026-05-20 12:00", "fan_growth": 76}
+        row = douyin._fan_growth_canonical(parsed, "xgame", captured)
+        self.assertIsNone(row["content_id"])
+        self.assertEqual(row["title"], "视频一")
+        self.assertEqual(row["published_at"], "2026-05-20 12:00")
+        self.assertEqual(row["metrics"], {"fans": 76})
+        self.assertTrue(row["join_key"].startswith("title-published:"))
+        self.assertEqual(row["join_key"], douyin._fan_growth_join_key("视频一", "2026-05-20 12:00"))
+
     def test_normalize_aweme_camelcase_and_snakecase(self):
         camel = douyin._normalize_aweme({
             "AwemeId": 123, "Desc": "标题", "CreateTime": 1716000000,
@@ -608,6 +619,7 @@ class SchemaConformance(unittest.TestCase):
             published_at="2026-05-29T17:45:00+08:00", captured_at="2026-06-01T00:00:00+08:00",
             source_url="u", metrics={"plays": 10, "shares": 2})
         row.update({
+            "join_key": "title-published:1234567890abcdef",
             "duration_s": 180.123,
             "cover_url": "https://img.example/cover.jpg",
             "category": "知识",

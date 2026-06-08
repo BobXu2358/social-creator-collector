@@ -17,7 +17,9 @@ that in mind when comparing across platforms:
 
 Platform-specific extras (e.g. ``full_play_ratio``) may appear as additional metric
 keys. ``content_id`` is null for Douyin fan-growth rows (the 投稿列表 DOM exposes no
-aweme_id) — those join to other rows only by (title, published_at).
+aweme_id); those rows include a fallback ``join_key`` derived from title and
+published_at. It is not a platform id, so prefer real ``content_id`` whenever one
+is available.
 
 Work metadata such as ``duration_s``, ``cover_url``, ``category``, ``tags``,
 ``work_type``, ``status``, ``visibility``, ``audit_status``, ``copyright``, and

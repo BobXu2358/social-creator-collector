@@ -13,6 +13,7 @@ Commands: check-cookies, import-cookies, worklist, fan-trend, fan-growth, commen
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import sys
@@ -788,6 +789,24 @@ def _parse_fan_table(table: list) -> list:
     return rows
 
 
+def _fan_growth_join_key(title: str | None, published: str | None) -> str | None:
+    if not title and not published:
+        return None
+    raw = f"{(title or '').strip()}\n{(published or '').strip()}"
+    return "title-published:" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _fan_growth_canonical(r: dict[str, Any], account: str, captured_at: str) -> dict[str, Any]:
+    row = schema.video_row(
+        platform="douyin", account=account, content_id=None,
+        title=r["title"], published_at=r["published"] or None, captured_at=captured_at,
+        metrics={"fans": r["fan_growth"]})
+    join_key = _fan_growth_join_key(row.get("title"), row.get("published_at"))
+    if join_key:
+        row["join_key"] = join_key
+    return row
+
+
 def fan_growth(*, ws: Path, account: str, state_path: Path, chromium: str | None,
                max_scroll: int = 40) -> dict[str, Any]:
     return asyncio.run(_fan_growth(ws, account, state_path, chromium, max_scroll))
@@ -837,10 +856,7 @@ async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str
 
     captured = datetime.now(TZ).isoformat()
     # No aweme_id in the 投稿列表 DOM → content_id is null; join by (title, published).
-    rows = [schema.video_row(
-        platform="douyin", account=account, content_id=None,
-        title=r["title"], published_at=r["published"] or None, captured_at=captured,
-        metrics={"fans": r["fan_growth"]}) for r in parsed]
+    rows = [_fan_growth_canonical(r, account, captured) for r in parsed]
 
     raw, processed = output_dirs(ws, account, "douyin")
     stamp = _stamp()
@@ -850,6 +866,9 @@ async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str
         "source": "Douyin creator data-center 投稿列表 DOM",
         "captured_at": captured,
         "scroll_rounds": scrolls, "row_count": len(rows), "rows": rows,
+        "field_notes": {
+            "join_key": "Fallback key for fan-growth rows when aweme_id is unavailable: sha1(title + newline + published_at), prefixed with title-published:. Stable for unchanged DOM text; can change if title or publish-time text changes.",
+        },
         "note": "bounded by the 投稿列表 发布时间 filter; widen it for older history",
     }
     jp = raw / f"douyin-fan-growth-{stamp}.json"
