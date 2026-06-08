@@ -1,9 +1,9 @@
 """Bilibili: plain-HTTPS creator-center and public-data collection.
 
-Why no browser here: the three creator cookies (``SESSDATA``, ``bili_jct``,
-``buvid3``) sent as a ``Cookie`` header are enough for the creator-center and
-comment APIs, so Bilibili stays a lightweight httpx path. Douyin can't — see
-``douyin.py``.
+Why no browser here: creator cookies sent as a ``Cookie`` header are enough for
+the creator-center and comment APIs, so Bilibili stays a lightweight httpx path.
+``SESSDATA``/``bili_jct`` prove the login session; ``buvid3`` is preserved when
+available but older valid credentials may not have it. Douyin can't — see ``douyin.py``.
 
 Commands: probe, summary, fan-source, comments, danmaku.
 """
@@ -26,7 +26,9 @@ import httpx
 from . import schema
 from .paths import TZ, CollectorError, output_dirs
 
-REQUIRED_FIELDS = ("SESSDATA", "bili_jct", "buvid3")
+REQUIRED_FIELDS = ("SESSDATA", "bili_jct")
+OPTIONAL_COOKIE_FIELDS = ("buvid3", "DedeUserID", "DedeUserID__ckMd5", "sid")
+LOGIN_COOKIE_FIELDS = REQUIRED_FIELDS + ("buvid3",)
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -36,14 +38,30 @@ _UA = (
 
 # ── credentials ──────────────────────────────────────────────────────────
 
+def _normalize_credentials(data: Any) -> dict[str, str]:
+    if isinstance(data, list):
+        return {
+            str(c["name"]): str(c["value"])
+            for c in data
+            if isinstance(c, dict) and c.get("name") and c.get("value")
+        }
+    if isinstance(data, dict):
+        cookies = data.get("cookies")
+        if isinstance(cookies, list):
+            return _normalize_credentials(cookies)
+        return {str(k): str(v) for k, v in data.items() if v}
+    raise CollectorError("Bilibili credential must be a JSON object or Cookie-Editor list")
+
+
 def load_credentials(path: Path, *, required: tuple[str, ...] = REQUIRED_FIELDS) -> dict[str, str]:
     if not path.exists():
         raise CollectorError(f"missing Bilibili credential file: {path}")
-    data = json.loads(path.read_text(encoding="utf-8"))
-    missing = [k for k in required if not data.get(k)]
+    creds = _normalize_credentials(json.loads(path.read_text(encoding="utf-8")))
+    missing = [k for k in required if not creds.get(k)]
     if missing:
         raise CollectorError(f"Bilibili credential missing fields {missing}; path={path}")
-    return {k: str(data[k]) for k in required if data.get(k)}
+    keep = required + tuple(k for k in OPTIONAL_COOKIE_FIELDS if k not in required)
+    return {k: creds[k] for k in keep if creds.get(k)}
 
 
 def cookie_header(creds: dict[str, str]) -> str:
@@ -127,7 +145,7 @@ def probe(*, ws: Path, account: str, credential_path: Path) -> dict[str, Any]:
         data = _get_json(c, "https://api.bilibili.com/x/web-interface/nav").get("data") or {}
     if not data.get("isLogin"):
         raise CollectorError(
-            "Bilibili cookie invalid or expired — re-export SESSDATA/bili_jct/buvid3."
+            "Bilibili cookie invalid or expired; re-export SESSDATA/bili_jct."
         )
     return {
         "ok": True,
@@ -189,10 +207,10 @@ async def _login_async(credential_path: Path, chromium: str | None, timeout_s: i
         finally:
             await browser.close()
 
-    out = {k: creds.get(k, "") for k in REQUIRED_FIELDS}
+    out = {k: creds.get(k, "") for k in LOGIN_COOKIE_FIELDS}
     if creds.get("DedeUserID"):
         out["DedeUserID"] = creds["DedeUserID"]  # platform uid — handy for consumers, not required
-    missing = [k for k in REQUIRED_FIELDS if not out[k]]
+    missing = [k for k in LOGIN_COOKIE_FIELDS if not out[k]]
     if missing:
         raise CollectorError(f"login succeeded but missing cookies {missing} — try again")
     credential_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -224,7 +242,7 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
         nav = _get_json(c, "https://api.bilibili.com/x/web-interface/nav").get("data") or {}
         if not nav.get("isLogin"):
             raise CollectorError(
-                "Bilibili cookie invalid or expired — re-export SESSDATA/bili_jct/buvid3."
+                "Bilibili cookie invalid or expired; re-export SESSDATA/bili_jct."
             )
 
         fan_obj = _get_json(
