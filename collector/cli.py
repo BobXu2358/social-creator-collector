@@ -61,7 +61,7 @@ def _sessdata(args) -> str | None:
         return args.sessdata
     path = _bili_credential(args)
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8")).get("SESSDATA")
+        return bilibili.load_credentials(path, required=("SESSDATA",)).get("SESSDATA")
     return None
 
 

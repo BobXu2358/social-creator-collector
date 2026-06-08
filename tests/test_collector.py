@@ -90,6 +90,42 @@ class CliBehavior(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("missing Bilibili credential", err)
 
+    def test_bilibili_load_credentials_accepts_legacy_without_buvid3(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bili.json"
+            path.write_text(json.dumps({
+                "SESSDATA": "sess",
+                "bili_jct": "csrf",
+                "DedeUserID": "123",
+                "sid": "abc",
+            }), encoding="utf-8")
+            creds = bilibili.load_credentials(path)
+        self.assertEqual(creds["SESSDATA"], "sess")
+        self.assertEqual(creds["bili_jct"], "csrf")
+        self.assertEqual(creds["DedeUserID"], "123")
+        self.assertEqual(creds["sid"], "abc")
+        self.assertNotIn("buvid3", creds)
+
+    def test_bilibili_load_credentials_accepts_cookie_editor_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bili-cookies.json"
+            path.write_text(json.dumps([
+                {"name": "SESSDATA", "value": "sess", "domain": ".bilibili.com"},
+                {"name": "bili_jct", "value": "csrf", "domain": ".bilibili.com"},
+                {"name": "buvid3", "value": "device", "domain": ".bilibili.com"},
+                {"name": "ignored_empty", "value": ""},
+            ]), encoding="utf-8")
+            creds = bilibili.load_credentials(path)
+        self.assertEqual(creds, {"SESSDATA": "sess", "bili_jct": "csrf", "buvid3": "device"})
+
+    def test_bilibili_load_credentials_still_requires_login_cookies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bili.json"
+            path.write_text(json.dumps({"SESSDATA": "sess"}), encoding="utf-8")
+            with self.assertRaises(CollectorError) as ctx:
+                bilibili.load_credentials(path)
+        self.assertIn("bili_jct", str(ctx.exception))
+
     def test_bilibili_comments_without_cookie_fails_loud(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, _, err = _run("bilibili", "comments", "--account", "xgame",
