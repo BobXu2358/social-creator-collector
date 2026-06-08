@@ -321,17 +321,56 @@ class PureParsers(unittest.TestCase):
     def test_normalize_aweme_camelcase_and_snakecase(self):
         camel = douyin._normalize_aweme({
             "AwemeId": 123, "Desc": "标题", "CreateTime": 1716000000,
+            "Duration": 180123,
+            "Cover": {"UrlList": ["https://img.example/cover.jpg"]},
+            "AwemeType": 4,
+            "Status": 2,
+            "Visibility": "public",
+            "AuditStatus": "pass",
             "Statistics": {"PlayCnt": 1000, "DiggCnt": 50, "CommentCnt": 7,
-                           "ShareCnt": 2, "CollectCnt": 3},
+                           "ShareCnt": 2, "ForwardCnt": 0, "CollectCnt": 3},
         })
         self.assertEqual(camel["aweme_id"], 123)
         self.assertEqual(camel["title"], "标题")
         self.assertEqual((camel["play"], camel["like"], camel["comment"],
                           camel["share"], camel["collect"]), (1000, 50, 7, 2, 3))
+        self.assertEqual(camel["duration_s"], 180.123)
+        self.assertEqual(camel["cover_url"], "https://img.example/cover.jpg")
+        self.assertEqual((camel["work_type"], camel["status"], camel["visibility"], camel["audit_status"]),
+                         (4, 2, "public", "pass"))
+        self.assertEqual(camel["forward"], 0)
         self.assertEqual(camel["url"], "https://www.douyin.com/video/123")
         snake = douyin._normalize_aweme({"aweme_id": "456", "desc": "t2",
-                                         "create_time": 1716000000, "play_count": 9, "digg_count": 1})
+                                         "create_time": 1716000000, "duration": 90,
+                                         "cover": ["https://img.example/cover2.jpg"],
+                                         "play_count": 9, "digg_count": 1})
         self.assertEqual((snake["aweme_id"], snake["play"], snake["like"]), ("456", 9, 1))
+        self.assertEqual(snake["duration_s"], 90)
+        self.assertEqual(snake["cover_url"], "https://img.example/cover2.jpg")
+
+    def test_aweme_canonical_preserves_work_metadata(self):
+        captured = "2026-06-02T12:00:00+08:00"
+        row = douyin._aweme_canonical({
+            "aweme_id": "123",
+            "title": "t",
+            "create_time": 1716000000,
+            "url": "https://www.douyin.com/video/123",
+            "play": 10,
+            "share": 4,
+            "forward": 0,
+            "duration_s": 180.123,
+            "cover_url": "https://img.example/cover.jpg",
+            "work_type": 4,
+            "status": 2,
+            "visibility": "public",
+            "audit_status": "pass",
+        }, "xgame", captured)
+        self.assertEqual(row["duration_s"], 180.123)
+        self.assertEqual(row["cover_url"], "https://img.example/cover.jpg")
+        self.assertEqual(row["metrics"]["shares"], 4)
+        self.assertEqual(row["platform_fields"], {"forward": 0})
+        self.assertEqual((row["work_type"], row["status"], row["visibility"], row["audit_status"]),
+                         (4, 2, "public", "pass"))
 
     def test_worklist_empty_diagnostics_helpers(self):
         self.assertTrue(douyin._looks_like_login_page("请扫码登录后继续"))
@@ -525,6 +564,22 @@ class SchemaConformance(unittest.TestCase):
             platform="bilibili", account="x", content_id="BV1", title="t",
             published_at="2026-05-29T17:45:00+08:00", captured_at="2026-06-01T00:00:00+08:00",
             source_url="u", metrics={"plays": 10, "likes": 2, "fans": 0}), "video_row")
+
+    def test_video_row_metadata_conforms(self):
+        row = schema.video_row(
+            platform="douyin", account="x", content_id="123", title="t",
+            published_at="2026-05-29T17:45:00+08:00", captured_at="2026-06-01T00:00:00+08:00",
+            source_url="u", metrics={"plays": 10, "shares": 2})
+        row.update({
+            "duration_s": 180.123,
+            "cover_url": "https://img.example/cover.jpg",
+            "work_type": 4,
+            "status": 2,
+            "visibility": "public",
+            "audit_status": "pass",
+            "platform_fields": {"forward": 0},
+        })
+        self._check(row, "video_row")
 
     def test_video_row_null_content_id_conforms(self):
         self._check(schema.video_row(
