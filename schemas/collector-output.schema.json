@@ -15,6 +15,10 @@
           "description": "bvid / aweme_id. null for Douyin fan-growth (DOM has no id) — join by title+published_at."
         },
         "title": { "type": ["string", "null"] },
+        "join_key": {
+          "type": "string",
+          "description": "Fallback join key when a platform row has no content_id. For Douyin fan-growth this is derived from title + published_at and is not a platform id."
+        },
         "duration_s": {
           "type": "number",
           "description": "Work duration in seconds when available."
