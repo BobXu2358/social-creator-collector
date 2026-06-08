@@ -23,6 +23,19 @@
           "type": "string",
           "description": "Cover image URL when available."
         },
+        "category": {
+          "type": "string",
+          "description": "Platform category or partition name when available."
+        },
+        "category_id": {
+          "type": ["string", "number", "integer"],
+          "description": "Platform category or partition identifier when available."
+        },
+        "tags": {
+          "type": "array",
+          "description": "Platform/public tags when available.",
+          "items": { "type": "string" }
+        },
         "work_type": {
           "description": "Platform-native work type when available, e.g. video/image-text/live replay.",
           "type": ["string", "number", "integer", "boolean"]
@@ -38,6 +51,14 @@
         "audit_status": {
           "description": "Platform-native audit/review status when available.",
           "type": ["string", "number", "integer", "boolean"]
+        },
+        "copyright": {
+          "description": "Platform-native copyright/originality value when available.",
+          "type": ["string", "number", "integer", "boolean"]
+        },
+        "is_original": {
+          "description": "Best-effort normalized originality flag when platform data supports it.",
+          "type": "boolean"
         },
         "platform_fields": {
           "type": "object",

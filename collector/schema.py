@@ -19,10 +19,11 @@ Platform-specific extras (e.g. ``full_play_ratio``) may appear as additional met
 keys. ``content_id`` is null for Douyin fan-growth rows (the 投稿列表 DOM exposes no
 aweme_id) — those join to other rows only by (title, published_at).
 
-Work metadata such as ``duration_s``, ``cover_url``, ``work_type``, ``status``,
-``visibility``, and ``audit_status`` may appear when a platform returns it. Unclear
-platform-native fields can be preserved under ``platform_fields`` with notes at the
-command-result level.
+Work metadata such as ``duration_s``, ``cover_url``, ``category``, ``tags``,
+``work_type``, ``status``, ``visibility``, ``audit_status``, ``copyright``, and
+``is_original`` may appear when a platform returns it. Unclear platform-native
+fields can be preserved under ``platform_fields`` with notes at the command-result
+level.
 """
 from __future__ import annotations
 

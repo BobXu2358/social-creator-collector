@@ -137,6 +137,93 @@ def _stat_int(*sources: dict[str, Any], names: tuple[str, ...], default: int = 0
     return default
 
 
+def _pick(obj: dict[str, Any], *names: str) -> Any:
+    for name in names:
+        if isinstance(obj, dict) and obj.get(name) not in (None, ""):
+            return obj[name]
+    return None
+
+
+def _duration_seconds(value: Any) -> float | None:
+    if isinstance(value, str) and ":" in value:
+        try:
+            parts = [int(p) for p in value.split(":")]
+        except Exception:
+            return None
+        if len(parts) == 2:
+            return parts[0] * 60 + parts[1]
+        if len(parts) == 3:
+            return parts[0] * 3600 + parts[1] * 60 + parts[2]
+        return None
+    try:
+        duration = float(value)
+    except Exception:
+        return None
+    if duration <= 0:
+        return None
+    return int(duration) if duration.is_integer() else round(duration, 3)
+
+
+def _bilibili_tags(client: httpx.Client, bvid: str | None) -> list[str]:
+    if not bvid:
+        return []
+    try:
+        obj = _get_json(
+            client,
+            "https://api.bilibili.com/x/tag/archive/tags",
+            {"bvid": bvid},
+            retries=1,
+            backoff_s=0.2,
+        )
+    except CollectorError:
+        return []
+    tags = obj.get("data") or []
+    if not isinstance(tags, list):
+        return []
+    out = []
+    for tag in tags:
+        if isinstance(tag, dict):
+            name = tag.get("tag_name") or tag.get("name")
+            if name:
+                out.append(str(name))
+    return out
+
+
+def _bilibili_view_metadata(client: httpx.Client, bvid: str | None) -> dict[str, Any]:
+    if not bvid:
+        return {}
+    try:
+        return _get_json(
+            client,
+            "https://api.bilibili.com/x/web-interface/view",
+            {"bvid": bvid},
+            retries=1,
+            backoff_s=0.2,
+        ).get("data") or {}
+    except CollectorError:
+        return {}
+
+
+def _bilibili_video_row_extra(client: httpx.Client, item: dict[str, Any]) -> dict[str, Any]:
+    bvid = str(item.get("bvid") or "")
+    view = _bilibili_view_metadata(client, bvid)
+    duration = _duration_seconds(_pick(item, "duration", "length") or view.get("duration"))
+    copyright_value = _pick(item, "copyright") or view.get("copyright")
+    extra = {
+        "duration_s": duration,
+        "cover_url": _pick(item, "pic", "cover", "cover_url") or view.get("pic"),
+        "category": _pick(item, "typename", "tname", "type_name") or view.get("tname"),
+        "category_id": _pick(item, "typeid", "type_id") or view.get("tid"),
+        "tags": _bilibili_tags(client, bvid),
+        "status": _pick(item, "state", "status", "pub_state"),
+        "audit_status": _pick(item, "audit_status", "review_status", "reject_reason"),
+        "copyright": copyright_value,
+    }
+    if str(copyright_value) in ("1", "2"):
+        extra["is_original"] = str(copyright_value) == "1"
+    return {k: v for k, v in extra.items() if v not in (None, "", [])}
+
+
 # ── probe ────────────────────────────────────────────────────────────────
 
 def probe(*, ws: Path, account: str, credential_path: Path) -> dict[str, Any]:
@@ -290,7 +377,7 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
                 if start <= pub.date() <= latest:
                     stat = it.get("real_stat") or it.get("stat") or {}
                     compare_stat = (compare_by_bvid.get(str(it.get("bvid"))) or {}).get("stat") or {}
-                    videos.append(schema.video_row(
+                    row = schema.video_row(
                         platform="bilibili", account=account, content_id=it.get("bvid"),
                         title=it.get("title"), published_at=pub.isoformat(), captured_at=captured,
                         source_url=f"https://www.bilibili.com/video/{it.get('bvid')}",
@@ -304,7 +391,9 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
                             "shares": _stat_int(compare_stat, stat, names=("share",)),
                             "danmaku": _stat_int(compare_stat, stat, names=("dm",)),
                             "full_play_ratio": stat.get("full_play_ratio"),
-                        }))
+                        })
+                    row.update(_bilibili_video_row_extra(c, it))
+                    videos.append(row)
             last_pubtime = items[-1].get("pubtime")
             last_pub = _date_from_epoch(last_pubtime)
             if last_pub and last_pub.date() < start:
@@ -318,6 +407,13 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
         "source": "Bilibili creator-center APIs",
         "range": {"start": start.isoformat(), "end": latest.isoformat(), "days": days},
         "captured_at": captured,
+        "field_notes": {
+            "duration_s": "Video duration in seconds, from creator archive data or public view metadata.",
+            "cover_url": "Cover image URL from creator archive data or public view metadata.",
+            "category": "Bilibili partition/category name when available.",
+            "tags": "Public archive tags when the tag endpoint returns them; missing tags mean unavailable, not necessarily untagged.",
+            "copyright": "Bilibili copyright value when available; 1 is treated as original and 2 as repost-like.",
+        },
         "fan_total": sum(r["fan_inc"] for r in fan_rows),
         "fan_trend": fan_rows,
         "videos": videos,
@@ -343,8 +439,15 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
     ]
     for v in videos:
         m = v["metrics"]
+        detail = []
+        if v.get("duration_s"):
+            detail.append(f"{int(v['duration_s'])}s")
+        if v.get("category"):
+            detail.append(str(v["category"]))
+        detail_text = f" ({', '.join(detail)})" if detail else ""
         lines.append(
             f"- {(v['published_at'] or '')[:16].replace('T', ' ')} `{v['content_id']}` {v['title']} — "
+            f"{detail_text} "
             f"play {m.get('plays', 0):,}, fans {m.get('fans', 0):,}, coin {m.get('coins', 0):,}, "
             f"reply {m.get('comments', 0):,}, likes {m.get('likes', 0):,}, "
             f"fav {m.get('collects', 0):,}, share {m.get('shares', 0):,}, dm {m.get('danmaku', 0):,}"

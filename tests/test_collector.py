@@ -303,6 +303,11 @@ class PureParsers(unittest.TestCase):
         self.assertEqual(rows[0]["count"], 60)
         self.assertEqual(rows[0]["share_pct"], 60.0)
 
+    def test_bilibili_duration_seconds_parses_colon_format(self):
+        self.assertEqual(bilibili._duration_seconds("10:05"), 605)
+        self.assertEqual(bilibili._duration_seconds("01:02:03"), 3723)
+        self.assertIsNone(bilibili._duration_seconds("bad"))
+
     def test_parse_fan_table_locates_column_by_header(self):
         table = [
             ["作品", "播放量", "粉丝增量", "评论"],
@@ -525,6 +530,38 @@ class RetryBehavior(unittest.TestCase):
         self.assertEqual(by_bvid["BV1"]["stat"]["coin"], 12)
         self.assertNotIn("", by_bvid)
 
+    def test_bilibili_video_row_extra_enriches_metadata(self):
+        client = _SeqClient([
+            _Resp(200, {"code": 0, "data": {
+                "duration": 610,
+                "pic": "https://img.example/view.jpg",
+                "tname": "科技",
+                "tid": 188,
+                "copyright": 1,
+            }}),
+            _Resp(200, {"code": 0, "data": [
+                {"tag_name": "AI"},
+                {"name": "教程"},
+            ]}),
+        ])
+        extra = bilibili._bilibili_video_row_extra(client, {
+            "bvid": "BV1",
+            "duration": "10:05",
+            "pic": "https://img.example/archive.jpg",
+            "typename": "知识",
+            "typeid": 36,
+            "state": "published",
+        })
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(extra["duration_s"], 605)
+        self.assertEqual(extra["cover_url"], "https://img.example/archive.jpg")
+        self.assertEqual(extra["category"], "知识")
+        self.assertEqual(extra["category_id"], 36)
+        self.assertEqual(extra["tags"], ["AI", "教程"])
+        self.assertEqual(extra["status"], "published")
+        self.assertEqual(extra["copyright"], 1)
+        self.assertTrue(extra["is_original"])
+
     def test_retries_transient_then_succeeds(self):
         client = _SeqClient([httpx.ConnectError("boom"), _Resp(503),
                              _Resp(200, {"code": 0, "data": {"ok": 1}})])
@@ -573,10 +610,15 @@ class SchemaConformance(unittest.TestCase):
         row.update({
             "duration_s": 180.123,
             "cover_url": "https://img.example/cover.jpg",
+            "category": "知识",
+            "category_id": 36,
+            "tags": ["AI", "教程"],
             "work_type": 4,
             "status": 2,
             "visibility": "public",
             "audit_status": "pass",
+            "copyright": 1,
+            "is_original": True,
             "platform_fields": {"forward": 0},
         })
         self._check(row, "video_row")
