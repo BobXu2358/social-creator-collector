@@ -462,6 +462,313 @@ def _days(n: int):
     return timedelta(days=n)
 
 
+# ── per-video detail (retention curve / completion / audience split) ──────
+#
+# The creator-center single-archive analysis ("稿件分析") exposes, per bvid/cid,
+# what `summary` cannot: the retention/quit curve by playback second, average
+# watch duration, completion vs same-tier peers, and the follower-vs-guest play
+# split. These are READ via the same member.bilibili.com data APIs the creator
+# center itself calls. All ratio fields are basis points (per 10000) — `_rate_pct`
+# normalizes them to a 2-dp percent so consumers never have to guess the scale.
+
+_ARCHIVE_VIEW = "https://member.bilibili.com/x/web/data/v3/archive/view"
+_DIAG_OVERVIEW = "https://member.bilibili.com/x/web/data/archive_diagnose/overview"
+_DIAG_PLAY = "https://member.bilibili.com/x/web/data/archive_diagnose/play_analyze"
+_DIAG_TRANSFAN = "https://member.bilibili.com/x/web/data/archive_diagnose/trans_fans_analyze"
+_ANALYZE_GRAPH = "https://member.bilibili.com/x/web/data/v2/archive/analyze/graph"
+
+
+def _rate_pct(value: Any) -> float | None:
+    """Bilibili creator-center ratios are basis points (per 10000) → percent, 2dp.
+
+    e.g. raw 5223 → 52.23. ``None``/non-numeric → ``None`` so the key is dropped
+    rather than emitted as a misleading 0.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if v == 0:
+        return 0.0
+    return round(v / 100, 2)
+
+
+def _share_pct(part: Any, other: Any) -> float | None:
+    """``part`` as a percent of ``part + other``. Unit-agnostic — works whether the
+    creator center hands back raw play counts or basis points (some archives return
+    one, some the other for the fans/guest split), since it normalizes by the sum."""
+    try:
+        a, b = float(part), float(other)
+    except (TypeError, ValueError):
+        return None
+    total = a + b
+    return round(a / total * 100, 2) if total > 0 else None
+
+
+def _retention_curve(quit_list: Any) -> list[dict[str, Any]]:
+    """``[{duration_key, num}]`` → ``[{second, retained_pct}]``.
+
+    ``num`` is basis-point retention (share still watching) at ``duration_key``
+    seconds. Drops malformed points instead of guessing.
+    """
+    out: list[dict[str, Any]] = []
+    for point in quit_list or []:
+        if not isinstance(point, dict):
+            continue
+        sec, ret = point.get("duration_key"), _rate_pct(point.get("num"))
+        if sec is None or ret is None:
+            continue
+        try:
+            out.append({"second": int(sec), "retained_pct": ret})
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+# archive_diagnose/overview play_proportion keys → the labels Bilibili's 播放量来源
+# pie uses. The new_* keys are the live ones; legacy keys are usually 0. This is a
+# *terminal* split (the only "source" Bilibili exposes per video), not channel source.
+_BILI_TERMINAL_LABELS = {
+    "new_mobile": "移动", "new_pc": "PC", "new_ott": "TV", "new_h5": "H5", "new_others": "其他",
+    "mobile": "移动", "pc": "PC", "ott": "TV", "tv": "TV", "h5": "H5",
+    "android": "Android", "ios": "iOS", "other": "其他", "out": "站外",
+}
+
+
+def _terminal_distribution(play_proportion: Any) -> list[dict[str, Any]]:
+    """``play_proportion`` raw counts → ``[{terminal, count, share_pct}]`` (UI labels,
+    percent), aggregated by label and sorted desc. Drops zero buckets."""
+    if not isinstance(play_proportion, dict):
+        return []
+    by_label: dict[str, int] = {}
+    for key, val in play_proportion.items():
+        if not isinstance(val, (int, float)) or val <= 0:
+            continue
+        label = _BILI_TERMINAL_LABELS.get(key, str(key))
+        by_label[label] = by_label.get(label, 0) + int(val)
+    total = sum(by_label.values())
+    if not total:
+        return []
+    rows = [{"terminal": label, "count": cnt, "share_pct": round(cnt / total * 100, 2)}
+            for label, cnt in by_label.items()]
+    return sorted(rows, key=lambda r: -r["count"])
+
+
+def _top_n(rows: Any, label_key: str, count_key: str, n: int) -> list[dict[str, Any]]:
+    """Top-N of a ``[{label_key, count_key}]`` distribution, by count desc."""
+    items = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        label, cnt = row.get(label_key), row.get(count_key)
+        if label in (None, "") or cnt in (None, ""):
+            continue
+        try:
+            items.append({"label": str(label), "count": int(cnt)})
+        except (TypeError, ValueError):
+            continue
+    return sorted(items, key=lambda r: -r["count"])[:n]
+
+
+def _bili_detail_row(*, account: str, captured: str, view: dict[str, Any],
+                     overview: dict[str, Any], play_analyze: dict[str, Any],
+                     graph: dict[str, Any], trans: dict[str, Any]) -> dict[str, Any]:
+    """Build one canonical per-video row enriched with a ``detail`` block.
+
+    Pure given the four already-fetched API payloads, so it is unit-tested offline.
+    """
+    stat = (overview or {}).get("stat") or {}
+    quit_info = (graph or {}).get("quit_info") or {}
+    aud = (overview or {}).get("audience_proportion") or {}
+    assistant = (play_analyze or {}).get("viewer_assistant") or {}
+    arc = (play_analyze or {}).get("arc_audience") or {}
+    bvid = str(view.get("bvid") or "")
+    duration_s = _duration_seconds(view.get("duration"))
+    pub = _date_from_epoch(view.get("pubtime"))
+
+    # Follower vs non-follower play split. audience_proportion.fans/guest are raw play
+    # COUNTS (not basis points), so normalize by their sum; fall back to play_analyze's
+    # viewer_assistant rates (those ARE basis points) when the split is absent.
+    follower_pct = _share_pct(aud.get("fans"), aud.get("guest"))
+    guest_pct = _share_pct(aud.get("guest"), aud.get("fans"))
+    if follower_pct is None:
+        follower_pct = _rate_pct(assistant.get("play_fan_rate"))
+        guest_pct = _rate_pct(assistant.get("play_viewer_rate"))
+
+    # avg_play_progress is the average watched seconds; full_play_ratio is the
+    # average watched FRACTION (avg_play_progress / duration), basis points — note
+    # that is "average completion", not "% who reached the end".
+    metrics = {
+        "plays": _stat_int(stat, view, names=("play", "view")),
+        "likes": _stat_int(stat, names=("like",)),
+        "comments": _stat_int(stat, names=("comment",)),
+        "coins": _stat_int(stat, names=("coin",)),
+        "collects": _stat_int(stat, names=("fav", "favorite")),
+        "shares": _stat_int(stat, names=("share",)),
+        "danmaku": _stat_int(stat, names=("dm",)),
+        "fans": _stat_int(stat, view, names=("fan", "fans", "fans_incr")),
+        "avg_watch_duration_s": quit_info.get("avg_play_progress"),
+        "avg_completion_pct": _rate_pct(quit_info.get("full_play_ratio")),
+        "follower_play_ratio_pct": follower_pct,
+        "guest_play_ratio_pct": guest_pct,
+    }
+    row = schema.video_row(
+        platform="bilibili", account=account, content_id=bvid or None,
+        title=view.get("title"), published_at=pub.isoformat() if pub else None,
+        captured_at=captured,
+        source_url=f"https://www.bilibili.com/video/{bvid}" if bvid else None,
+        metrics={k: v for k, v in metrics.items() if v is not None})
+    if duration_s:
+        row["duration_s"] = duration_s
+    if view.get("cover"):
+        row["cover_url"] = view["cover"]
+    if str(view.get("copyright")) in ("1", "2"):
+        row["copyright"] = view["copyright"]
+        row["is_original"] = str(view["copyright"]) == "1"
+
+    detail: dict[str, Any] = {
+        "retention_curve": _retention_curve((graph or {}).get("viewer_quit")),
+        "peer_retention_curve": _retention_curve((graph or {}).get("peer_viewer_quit")),
+        "completion": {
+            "avg_watch_duration_s": quit_info.get("avg_play_progress"),
+            "avg_completion_pct": _rate_pct(quit_info.get("full_play_ratio")),
+            "peer_avg_completion_pct": _rate_pct(quit_info.get("full_play_ratio_avg")),
+            "peer_median_completion_pct": _rate_pct(quit_info.get("full_play_ratio_medium")),
+            "vs_peers_percentile_pct": _rate_pct(quit_info.get("pass_peer")),
+        },
+        "audience_play_split": {
+            "follower_pct": follower_pct,
+            "non_follower_pct": guest_pct,
+        },
+        "terminal_distribution": _terminal_distribution((overview or {}).get("play_proportion")),
+        "demographics": {
+            "gender": (overview or {}).get("gender"),
+            "age": (overview or {}).get("viewer_age"),
+            "top_regions": _top_n((overview or {}).get("viewer_area"), "location", "count", 8),
+            "top_interest_tags": _top_n((overview or {}).get("viewer_ty"), "tag_name", "count", 10),
+        },
+        "vs_peers": {
+            "play_pass_rate_percentile_pct": _rate_pct(arc.get("play_viewer_pass_rate")),
+        },
+    }
+    ptf = (trans or {}).get("play_trans_fan") or {}
+    if ptf:
+        detail["fan_conversion"] = {
+            "new_fans": ptf.get("total_new_attention_cnt"),
+            "viewer_play_cnt": ptf.get("viewer_play_cnt"),
+            "vs_peers_percentile_pct": _rate_pct(ptf.get("total_play_trans_fan_pass_per")),
+        }
+
+    def _clean(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            cleaned = {k: _clean(v) for k, v in obj.items()}
+            return {k: v for k, v in cleaned.items() if v not in (None, {}, [])}
+        return obj
+
+    row["detail"] = _clean(detail)
+    return row
+
+
+def _detail_field_notes() -> dict[str, str]:
+    return {
+        "metrics.avg_watch_duration_s": "Average watched seconds (creator-center avg_play_progress).",
+        "metrics.avg_completion_pct": "Average watched fraction = avg_play_progress / duration, percent. "
+                                      "This is mean completion, NOT the share of viewers who reached the end.",
+        "metrics.follower_play_ratio_pct / guest_play_ratio_pct": "Share of plays from followers vs non-followers, percent.",
+        "detail.retention_curve": "[{second, retained_pct}] — share still watching at each playback second.",
+        "detail.completion.vs_peers_percentile_pct": "Percentile vs same-tier peers (higher = better than more peers).",
+        "detail.terminal_distribution": "Plays by client/terminal (Bilibili '播放量来源' is terminal split, "
+                                        "not a recommend/search traffic-source breakdown — that is not exposed per-video).",
+    }
+
+
+def video_detail(*, ws: Path, account: str, credential_path: Path, bvid: str,
+                 with_peers: bool = True) -> dict[str, Any]:
+    creds = load_credentials(credential_path)
+    cookie = cookie_header(creds)
+    referer = "https://member.bilibili.com/york/data-center-web"
+    with _client(cookie, referer) as c:
+        nav = _get_json(c, "https://api.bilibili.com/x/web-interface/nav").get("data") or {}
+        if not nav.get("isLogin"):
+            raise CollectorError("Bilibili cookie invalid or expired; re-export SESSDATA/bili_jct.")
+        view = _get_json(c, _ARCHIVE_VIEW, {"bvid": bvid, "t": int(time.time() * 1000)}).get("data") or {}
+        if not view.get("bvid"):
+            raise CollectorError(f"Bilibili archive view returned no data for {bvid} — wrong bvid or not your archive")
+        videos = view.get("videos") or []
+        cid = (videos[0].get("cid") if videos and isinstance(videos[0], dict) else None) or view.get("cid")
+        overview = _get_json(c, _DIAG_OVERVIEW, {"bvid": bvid, "t": int(time.time() * 1000)}).get("data") or {}
+        play_analyze = _get_json(c, _DIAG_PLAY, {"bvid": bvid, "t": int(time.time() * 1000)}).get("data") or {}
+        graph: dict[str, Any] = {}
+        if cid:
+            graph = _get_json(c, _ANALYZE_GRAPH, {"cid": cid, "t": int(time.time() * 1000)}).get("data") or {}
+        trans: dict[str, Any] = {}
+        if with_peers:
+            try:
+                trans = _get_json(c, _DIAG_TRANSFAN, {"bvid": bvid, "t": int(time.time() * 1000)}).get("data") or {}
+            except CollectorError:
+                trans = {}
+
+    captured = datetime.now(TZ).isoformat()
+    row = _bili_detail_row(account=account, captured=captured, view=view, overview=overview,
+                           play_analyze=play_analyze, graph=graph, trans=trans)
+    result = {
+        "schema_version": schema.SCHEMA_VERSION,
+        "account": account,
+        "platform": "bilibili",
+        "source": "Bilibili creator-center single-archive analysis (稿件分析) APIs",
+        "captured_at": captured,
+        "bvid": row["content_id"],
+        "cid": cid,
+        "field_notes": _detail_field_notes(),
+        "video": row,
+    }
+    raw, processed = output_dirs(ws, account, "bilibili")
+    stamp = _stamp()
+    jp = raw / f"bilibili-video-detail-{row['content_id']}-{stamp}.json"
+    mp = processed / f"bilibili-video-detail-{row['content_id']}-{stamp}.md"
+    jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    mp.write_text(_render_detail_md(row), encoding="utf-8")
+    m = row["metrics"]
+    return {"ok": True, "json": str(jp), "markdown": str(mp), "bvid": row["content_id"],
+            "avg_watch_duration_s": m.get("avg_watch_duration_s"),
+            "avg_completion_pct": m.get("avg_completion_pct"),
+            "retention_points": len(row.get("detail", {}).get("retention_curve") or [])}
+
+
+def _render_detail_md(row: dict[str, Any]) -> str:
+    m = row["metrics"]
+    d = row.get("detail") or {}
+    comp = d.get("completion") or {}
+    lines = [
+        f"# 稿件分析：{row.get('title') or row.get('content_id')}",
+        "",
+        f"- bvid: `{row.get('content_id')}`",
+        f"- 时长：{int(row['duration_s'])} 秒" if row.get("duration_s") else "",
+        f"- 播放：{m.get('plays', 0):,}",
+        f"- 平均观看时长：{m.get('avg_watch_duration_s', '—')} 秒",
+        f"- 平均完播（avg_play_progress/时长）：{m.get('avg_completion_pct', '—')}%"
+        + (f"（同类均值 {comp.get('peer_avg_completion_pct')}%）" if comp.get("peer_avg_completion_pct") is not None else ""),
+        f"- 关注/非关注播放占比：{m.get('follower_play_ratio_pct', '—')}% / {m.get('guest_play_ratio_pct', '—')}%",
+        "",
+        "## 留存曲线（每秒仍在观看占比）",
+        "",
+        "| 秒 | 留存% | 同类% |",
+        "|---:|---:|---:|",
+    ]
+    peer = {p["second"]: p["retained_pct"] for p in (d.get("peer_retention_curve") or [])}
+    for p in (d.get("retention_curve") or []):
+        lines.append(f"| {p['second']} | {p['retained_pct']} | {peer.get(p['second'], '')} |")
+    terminals = d.get("terminal_distribution") or []
+    if terminals:
+        lines += ["", "## 播放量来源（终端）", "",
+                  "、".join(f"{t['terminal']} {t['share_pct']}%" for t in terminals)]
+    regions = d.get("demographics", {}).get("top_regions") or []
+    if regions:
+        lines += ["", "## 观众地域 Top",
+                  "", "、".join(f"{r['label']}({r['count']:,})" for r in regions[:8])]
+    return "\n".join(x for x in lines if x != "") + "\n"
+
+
 # ── fan sources ──────────────────────────────────────────────────────────
 
 _FAN_SOURCE_LABELS = {

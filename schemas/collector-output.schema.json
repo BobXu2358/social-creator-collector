@@ -69,6 +69,11 @@
           "description": "Raw platform-specific fields preserved for diagnostics when semantics are not canonicalized.",
           "additionalProperties": true
         },
+        "detail": {
+          "type": "object",
+          "description": "Per-video deep analytics from a detail command (bilibili video-detail / douyin item-analysis): e.g. retention_curve [{second, retained_pct}], completion, audience_play_split, terminal_distribution, demographics, fan_conversion, or per-client splits. Present only on detail rows; shapes vary by platform.",
+          "additionalProperties": true
+        },
         "published_at": {
           "type": ["string", "null"],
           "description": "ISO8601 where available; Douyin fan-growth rows are a minute-precision local 'YYYY-MM-DD HH:MM' string (DOM-sourced)."
@@ -77,7 +82,7 @@
         "source_url": { "type": ["string", "null"] },
         "metrics": {
           "type": "object",
-          "description": "Only keys that apply are present (absent = N/A). Standard keys below; platforms may add extras (e.g. full_play_ratio).",
+          "description": "Only keys that apply are present (absent = N/A). Standard keys below; platforms may add extras. Detail commands add per-video keys: avg_watch_duration_s (seconds); avg_completion_pct / completion_rate_5s_pct / bounce_rate_2s_pct / follower_play_ratio_pct / guest_play_ratio_pct (all percent, already normalized — bilibili from basis points, douyin from 0..1 fractions).",
           "properties": {
             "plays": { "type": "integer" },
             "likes": { "type": "integer" },

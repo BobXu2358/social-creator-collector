@@ -17,3 +17,6 @@ dist/
 *.jpg
 *.tgz
 .DS_Store
+
+# read-only discovery scratch (never shipped in core)
+discovery/
