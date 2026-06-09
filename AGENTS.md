@@ -141,6 +141,7 @@ python -m collector <group> <action> --account <account> [options]
 | `bilibili login --account X` | QR scan login (headed browser) → credential file |
 | `bilibili probe --account X` | verify B站 login + identity (fails loud if cookie expired) |
 | `bilibili summary --account X --days 30` | fan trend + per-video play/fans/coin/reply/likes |
+| `bilibili video-detail --account X --bvid BVxxx` | single-video retention curve + completion + follower/guest split + audience |
 | `bilibili fan-source --account X` | fan source distribution (video/search/space/etc.) |
 | `bilibili comments --account X --bvid BVxxx` | collect top-level video comments |
 | `bilibili danmaku --account X --bvid BVxxx` | fetch danmaku + density-peak analysis |
@@ -148,6 +149,8 @@ python -m collector <group> <action> --account <account> [options]
 | `douyin check-cookies --account X` | validate a Cookie-Editor export's structure |
 | `douyin import-cookies --account X` | cookies → Playwright storage state + verify login |
 | `douyin worklist --account X --days 30` | creator-center work list + basic metrics |
+| `douyin item-analysis --account X --days 30` | per-work avg watch time + 5s完播率 + 2s跳出率 (作品分析批量) |
+| `douyin video-detail --account X --aweme-id ID` | single-video 完播率 + 流量来源 + 进度曲线 + 搜索词 + 观众画像 (分析详情) |
 | `douyin fan-trend --account X --days 30` | daily net fans + related overview metrics |
 | `douyin fan-growth --account X` | **per-video 粉丝增量** from 投稿列表 DOM |
 | `douyin comments --account X --aweme-id ID` | collect video comments |
@@ -179,6 +182,23 @@ downstream tools against this shape, not against one command's incidental JSON.
 - **Bilibili fan source is a direct creator-center source split.** `bilibili fan-source`
   emits counts for buckets like video/search/space/recommend/live/other; use it as a
   supporting input next to `summary`'s daily fan trend and per-video fan attribution.
+- **Per-video detail is its own command on each platform.** `bilibili video-detail --bvid`
+  reads the 稿件分析 APIs: a per-second retention curve, average watch duration,
+  average completion vs same-tier peers, and the follower-vs-guest play split (plus
+  terminal/region/interest breakdowns). On Douyin there are two layers: `douyin
+  item-analysis --days` is the **batch** 作品分析 (per-work avg watch / 5s完播率 / 2s跳出率
+  across the window), and `douyin video-detail --aweme-id` is the **single-work** 分析详情
+  — full **完播率**, the **流量来源** split (推荐/关注/搜索/个人主页/…), drag-back/forward
+  progress curves, the **搜索词** that surfaced the work, and an audience portrait. The
+  Douyin detail endpoints reject a raw fetch (the page signs them), so video-detail
+  navigates work-detail and intercepts the responses — the same pattern as `comments`.
+  All rate fields are pre-normalized to percent.
+- **Two platform quirks worth knowing.** Bilibili's `avg_completion_pct` is the mean
+  watched fraction (avg progress ÷ duration), not the share who reached the end; its
+  "播放量来源" is a *terminal* split (手机/PC/电视), not a recommend/search traffic source —
+  Bilibili doesn't expose that per video. Douyin's `completion_rate_pct` (from video-detail)
+  IS the real 完播率, and Douyin's "retention" is exposed as drag-back/forward distributions
+  by playback second, not a plain still-watching curve.
 - **B站 comments need a login cookie.** The anonymous/`x/v2/reply/wbi/main` endpoints
   return ~3 hot comments or trigger `412` — the collector uses `x/v2/reply/main` with cookie.
 - **Cookie expiry is the usual failure.** If a command returns empty or a login warning,

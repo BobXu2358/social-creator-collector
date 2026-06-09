@@ -599,6 +599,165 @@ class RetryBehavior(unittest.TestCase):
         self.assertEqual(client.calls, 4)  # 1 initial + 3 retries
 
 
+# Fixtures mirror the shapes captured during read-only discovery (units in particular:
+# Bilibili ratios are basis points per 10000; Douyin rates are 0..1 fractions).
+_BILI_VIEW = {"bvid": "BV1GZEu6cEaq", "cid": 111, "videos": [{"cid": 222}],
+              "title": "说真的", "duration": 689, "cover": "https://i/cov.jpg",
+              "pubtime": 1748511900, "copyright": 1, "view": 17331, "fans_incr": 10}
+_BILI_OVERVIEW = {
+    "stat": {"play": 17331, "like": 1200, "comment": 300, "share": 80, "fav": 400,
+             "coin": 90, "dm": 60, "fan": 10},
+    "play_proportion": {"new_mobile": 9000, "new_pc": 4000, "new_ott": 30, "android": 0},
+    "audience_proportion": {"fans": 5802, "guest": 4220},
+    "gender": {"male": 3529, "female": 185},
+    "viewer_age": {"age_one": 100, "age_two": 4000},
+    "viewer_area": [{"location": "广东", "count": 500}, {"location": "北京", "count": 300}],
+    "viewer_ty": [{"tag_name": "单机游戏", "count": 800}, {"tag_name": "主机", "count": 200}],
+}
+_BILI_PLAY = {"viewer_assistant": {"play_fan_rate": 5789, "play_viewer_rate": 4211},
+              "arc_audience": {"play_viewer_pass_rate": 4999}}
+_BILI_GRAPH = {
+    "viewer_quit": [{"duration_key": 30, "num": 7705}, {"duration_key": 60, "num": 6937}],
+    "peer_viewer_quit": [{"duration_key": 30, "num": 7000}],
+    "quit_info": {"avg_play_progress": 359, "full_play_ratio": 5223,
+                  "full_play_ratio_avg": 3668, "full_play_ratio_medium": 3750, "pass_peer": 8483},
+    "duration_info": {"avg_play_time": "-", "avg_play_time_int": 0},
+}
+_BILI_TRANS = {"play_trans_fan": {"total_new_attention_cnt": 12, "viewer_play_cnt": 7000,
+                                  "total_play_trans_fan_pass_per": 6000}}
+_DY_ITEM = {"item_id": "7648986531704638726", "title": "ELO", "publish_time": "2026-03-11 12:00",
+            "play_count": "268778", "average_play_duration": 31.104,
+            "completion_rate_5s": 0.4066, "bounce_rate_2s": 0.447,
+            "cover": {"url_list": ["https://i/c.jpg"]},
+            "play_count_per_client": {"douyin_value": "200000", "xigua_value": "68778"},
+            "average_play_duration_per_client": {"douyin_value": 30.1, "xigua_value": 35.0}}
+
+
+class PerVideoDetailHelpers(unittest.TestCase):
+    def test_rate_pct_treats_basis_points_as_percent(self):
+        self.assertEqual(bilibili._rate_pct(5223), 52.23)
+        self.assertEqual(bilibili._rate_pct(0), 0.0)
+        self.assertIsNone(bilibili._rate_pct(None))
+        self.assertIsNone(bilibili._rate_pct("x"))
+
+    def test_share_pct_normalizes_counts_or_basis_points(self):
+        self.assertEqual(bilibili._share_pct(18741, 161993), 10.37)   # raw counts
+        self.assertEqual(bilibili._share_pct(5802, 4220), 57.89)      # ~basis points
+        self.assertIsNone(bilibili._share_pct(0, 0))
+        self.assertIsNone(bilibili._share_pct(None, 5))
+
+    def test_retention_curve_normalizes_and_skips_garbage(self):
+        curve = bilibili._retention_curve(
+            [{"duration_key": 30, "num": 7705}, {"bad": 1}, {"duration_key": 60, "num": 6937}])
+        self.assertEqual(curve, [{"second": 30, "retained_pct": 77.05},
+                                 {"second": 60, "retained_pct": 69.37}])
+
+    def test_top_n_sorts_by_count_desc(self):
+        top = bilibili._top_n(_BILI_OVERVIEW["viewer_area"], "location", "count", 1)
+        self.assertEqual(top, [{"label": "广东", "count": 500}])
+
+    def test_bili_detail_row_units_and_detail_block(self):
+        row = bilibili._bili_detail_row(
+            account="x", captured="c", view=_BILI_VIEW, overview=_BILI_OVERVIEW,
+            play_analyze=_BILI_PLAY, graph=_BILI_GRAPH, trans=_BILI_TRANS)
+        m = row["metrics"]
+        self.assertEqual(m["plays"], 17331)
+        self.assertEqual(m["avg_watch_duration_s"], 359)
+        self.assertEqual(m["avg_completion_pct"], 52.23)
+        # fans/guest are raw counts → normalized by sum: 5802/(5802+4220)=57.89
+        self.assertEqual(m["follower_play_ratio_pct"], 57.89)
+        self.assertEqual(m["guest_play_ratio_pct"], 42.11)
+        self.assertEqual(row["duration_s"], 689)
+        self.assertTrue(row["is_original"])
+        d = row["detail"]
+        self.assertEqual(d["retention_curve"][0], {"second": 30, "retained_pct": 77.05})
+        self.assertEqual(d["completion"]["peer_avg_completion_pct"], 36.68)
+        self.assertEqual(d["completion"]["vs_peers_percentile_pct"], 84.83)
+        self.assertEqual(d["fan_conversion"]["new_fans"], 12)
+        self.assertEqual(d["demographics"]["top_regions"][0]["label"], "广东")
+        # terminal "播放量来源": new_mobile 9000 / new_pc 4000 / new_ott 30 → 移动/PC/TV, percent
+        term = d["terminal_distribution"]
+        self.assertEqual([t["terminal"] for t in term], ["移动", "PC", "TV"])
+        self.assertEqual(term[0]["share_pct"], 69.07)  # 9000/13030
+
+    def test_terminal_distribution_maps_labels_and_drops_zero(self):
+        rows = bilibili._terminal_distribution(
+            {"new_mobile": 808, "new_pc": 188, "new_ott": 4, "new_h5": 0, "android": 0})
+        self.assertEqual([r["terminal"] for r in rows], ["移动", "PC", "TV"])
+        self.assertEqual(rows[0]["share_pct"], 80.8)
+        self.assertEqual(rows[1]["share_pct"], 18.8)
+
+    def test_frac_pct_treats_fraction_as_percent(self):
+        self.assertEqual(douyin._frac_pct(0.4066), 40.66)
+        self.assertIsNone(douyin._frac_pct(None))
+
+    def test_item_perf_row_units_and_client_split(self):
+        row = douyin._item_perf_row(_DY_ITEM, "x", "c")
+        m = row["metrics"]
+        self.assertEqual(row["content_id"], "7648986531704638726")
+        self.assertEqual(m["plays"], 268778)
+        self.assertEqual(m["avg_watch_duration_s"], 31.1)
+        self.assertEqual(m["completion_rate_5s_pct"], 40.66)
+        self.assertEqual(m["bounce_rate_2s_pct"], 44.7)
+        self.assertEqual(row["cover_url"], "https://i/c.jpg")
+        self.assertEqual(row["detail"]["play_count_by_client"]["douyin_value"], 200000)
+        self.assertEqual(row["detail"]["avg_watch_duration_s_by_client"]["xigua_value"], 35.0)
+
+    def test_douyin_source_rows_label_and_sort(self):
+        rows = douyin._source_rows([
+            {"key": "search", "value": 0.028}, {"key": "homepage_hot", "value": 0.5593},
+            {"key": "weird", "value": 0.1}, {"bad": 1}])
+        # sorted by share desc: homepage_hot 55.93 > weird 10 > search 2.8
+        self.assertEqual([r["source_label"] for r in rows], ["推荐(首页推荐)", "weird", "搜索"])
+        self.assertEqual(rows[0]["share_pct"], 55.93)
+        self.assertEqual(rows[1]["source_key"], "weird")  # unknown key passes through verbatim
+
+    def test_douyin_progress_curve_parses_seconds_and_pct(self):
+        curve = douyin._progress_curve([{"key": "11.5", "value": 0.0063}, {"key": "x", "value": 1}])
+        self.assertEqual(curve, [{"second": 11.5, "pct": 0.63}])
+
+    def test_dy_detail_row_units_and_blocks(self):
+        compare = {
+            "item": {"description": "说真的", "create_time": "1749468000",
+                     "metrics": {"view_count": "4674", "completion_rate": "0.025924",
+                                 "completion_rate_5s": "0.508318", "bounce_rate_2s": "0.316697",
+                                 "avg_view_second": "66.756524", "avg_view_proportion": "0.096925",
+                                 "cover_click_rate": "0.243376", "fan_view_proportion": "0.219607",
+                                 "like_rate": "0.031665"}},
+            "compare_item_ids": ["7600000000000000001", "7600000000000000002"],
+        }
+        source = {"play_source": [{"key": "homepage_hot", "value": 0.5593},
+                                  {"key": "follow", "value": 0.2605}]}
+        progress = {"jump_backward": [{"key": "11.5", "value": 0.0063}],
+                    "jump_forward": [{"key": "11.5", "value": 0.0113}]}
+        search = {"show_from": [{"keyword": "elo机制", "percent": 1}]}
+        portrait = {"gender": {"ratio_list": [{"key": "男", "value": 0.8}, {"key": "女", "value": 0.2}]},
+                    "province": {"ratio_list": [{"key": "广东", "value": 0.15}]}}
+        row = douyin._dy_detail_row(account="x", captured="c", aweme_id="7648986531704638726",
+                                    compare=compare, source=source, progress=progress,
+                                    search=search, portrait=portrait)
+        m = row["metrics"]
+        self.assertEqual(m["plays"], 4674)
+        self.assertEqual(m["completion_rate_pct"], 2.59)
+        self.assertEqual(m["avg_watch_duration_s"], 66.76)
+        self.assertEqual(m["follower_play_ratio_pct"], 21.96)
+        self.assertEqual(m["cover_click_rate_pct"], 24.34)
+        d = row["detail"]
+        self.assertEqual(d["traffic_source"][0]["source_label"], "推荐(首页推荐)")
+        self.assertEqual(d["search_keywords"][0]["keyword"], "elo机制")
+        self.assertEqual(d["peer_comparison"]["peer_count"], 2)
+        self.assertEqual(d["peer_comparison"]["peer_aweme_ids"][0], "7600000000000000001")
+        self.assertEqual(d["audience"]["gender"][0]["key"], "男")
+
+    def test_overview_block_adds_value_pct_for_rates(self):
+        block = douyin._overview_block({
+            "completion_rate_5s": {"metric_name": "条均5s完播率", "metric_value": 0.5112},
+            "median_play_count": {"metric_name": "中位播放", "metric_value": 123456},
+        })
+        self.assertEqual(block["completion_rate_5s"]["value_pct"], 51.12)
+        self.assertNotIn("value_pct", block["median_play_count"])
+
+
 @unittest.skipUnless(jsonschema is not None, "jsonschema not installed (pip install -e '.[dev]')")
 class SchemaConformance(unittest.TestCase):
     """Emitted rows must validate against schemas/collector-output.schema.json."""
@@ -606,6 +765,26 @@ class SchemaConformance(unittest.TestCase):
     def _check(self, instance, def_name):
         sub = {"$ref": f"#/$defs/{def_name}", "$defs": _SCHEMA["$defs"]}
         jsonschema.Draft202012Validator(sub).validate(instance)
+
+    def test_bilibili_detail_row_conforms(self):
+        self._check(bilibili._bili_detail_row(
+            account="x", captured="c", view=_BILI_VIEW, overview=_BILI_OVERVIEW,
+            play_analyze=_BILI_PLAY, graph=_BILI_GRAPH, trans=_BILI_TRANS), "video_row")
+
+    def test_douyin_item_analysis_row_conforms(self):
+        self._check(douyin._item_perf_row(_DY_ITEM, "x", "c"), "video_row")
+
+    def test_douyin_video_detail_row_conforms(self):
+        compare = {"item": {"description": "t", "create_time": "1749468000",
+                            "metrics": {"view_count": "100", "completion_rate": "0.02",
+                                        "avg_view_second": "60", "fan_view_proportion": "0.2"}},
+                   "compare_item_ids": ["7600000000000000001"]}
+        self._check(douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
+            source={"play_source": [{"key": "follow", "value": 0.5}]},
+            progress={"jump_backward": [{"key": "10", "value": 0.1}]},
+            search={"show_from": [{"keyword": "k", "percent": 1}]},
+            portrait={"gender": {"ratio_list": [{"key": "男", "value": 0.8}]}}), "video_row")
 
     def test_video_row_conforms(self):
         self._check(schema.video_row(

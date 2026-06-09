@@ -12,4 +12,4 @@ under ``social/_secrets/<account>/<platform>/`` and never enter chat or logs.
 
 __all__ = ["__version__"]
 
-__version__ = "2.3.1"
+__version__ = "2.4.0"

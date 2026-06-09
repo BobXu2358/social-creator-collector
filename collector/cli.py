@@ -135,6 +135,16 @@ def _build_parser() -> argparse.ArgumentParser:
     b_sum.set_defaults(func=lambda a: bilibili.summary(
         ws=_ws(a), account=a.account, credential_path=_bili_credential(a), days=a.days))
 
+    b_det = bili.add_parser("video-detail", parents=[common],
+                            help="single-video retention curve / completion / audience split")
+    b_det.add_argument("--credential", default="")
+    b_det.add_argument("--bvid", required=True)
+    b_det.add_argument("--no-peers", action="store_true", dest="no_peers",
+                       help="skip the fan-conversion / peer-comparison call")
+    b_det.set_defaults(func=lambda a: bilibili.video_detail(
+        ws=_ws(a), account=a.account, credential_path=_bili_credential(a),
+        bvid=a.bvid, with_peers=not a.no_peers))
+
     b_src = bili.add_parser("fan-source", parents=[common], help="fan source distribution")
     b_src.add_argument("--credential", default="")
     b_src.set_defaults(func=lambda a: bilibili.fan_source(
@@ -200,6 +210,24 @@ def _build_parser() -> argparse.ArgumentParser:
     d_wl.set_defaults(func=lambda a: douyin.worklist(
         ws=_ws(a), account=a.account, state_path=_douyin_state(a), days=a.days,
         max_pages=a.max_pages, chromium=a.chromium or None))
+
+    d_ia = dy.add_parser("item-analysis", parents=[common],
+                         help="per-work avg watch / 5s completion / 2s bounce (作品分析)")
+    d_ia.add_argument("--storage-state", default="", dest="storage_state")
+    d_ia.add_argument("--days", type=_bounded_int(1, 3650), default=30)
+    _chromium(d_ia)
+    d_ia.set_defaults(func=lambda a: douyin.item_analysis(
+        ws=_ws(a), account=a.account, state_path=_douyin_state(a), days=a.days,
+        chromium=a.chromium or None))
+
+    d_vd = dy.add_parser("video-detail", parents=[common],
+                         help="single-video 完播率 / 流量来源 / 进度 / 搜索词 / 同类对比 (分析详情)")
+    d_vd.add_argument("--storage-state", default="", dest="storage_state")
+    d_vd.add_argument("--aweme-id", required=True, dest="aweme_id")
+    _chromium(d_vd)
+    d_vd.set_defaults(func=lambda a: douyin.video_detail(
+        ws=_ws(a), account=a.account, state_path=_douyin_state(a), aweme_id=a.aweme_id,
+        chromium=a.chromium or None))
 
     d_ft = dy.add_parser("fan-trend", parents=[common],
                          help="account-level daily net fan trend")

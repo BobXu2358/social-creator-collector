@@ -744,6 +744,507 @@ def _fmt(v: Any) -> str:
         return str(v)
 
 
+# ── per-video detail metrics (作品分析: completion / watch / bounce) ───────
+#
+# Douyin's 作品分析 page exposes per-work early-retention metrics the basic
+# work_list does not: average watch duration, 5-second completion, and 2-second
+# bounce. Unlike fan-growth this is a clean JSON API (no DOM scraping), called
+# from inside the page so the a-bogus/login context is the browser's.
+#
+# Reproduces the page's own sequence: GET involved_vertical for the account's
+# primary_verticals, then POST item_analysis/{overview,item_performance}. Both the
+# fixed genre set and the verticals are REQUIRED — an empty value makes the API
+# return zero items (verified during discovery). Dates are YYYYMMDD.
+#
+# Honest limits: full 完播率, a progress retention curve, and per-video traffic
+# source are NOT exposed by a clean creator-center web API for this surface — only
+# the early-retention trio below is. See AGENTS.md.
+
+_ITEM_ANALYSIS_BASE = "/janus/douyin/creator/data/item_analysis"
+_ITEM_GENRES = [1, 2, 3, 4, 5, 8]  # content-genre enum; empty body → 0 items
+
+
+def _yyyymmdd(d: "datetime") -> str:
+    return d.strftime("%Y%m%d")
+
+
+def _frac_pct(value: Any) -> float | None:
+    """Douyin rates are 0..1 fractions → percent, 2dp (0.4066 → 40.66)."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(v * 100, 2)
+
+
+def _round_or_none(value: Any, ndigits: int = 2) -> float | None:
+    try:
+        return round(float(value), ndigits)
+    except (TypeError, ValueError):
+        return None
+
+
+def _client_split(block: Any, *, parse: bool) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    if not isinstance(block, dict):
+        return out
+    for key, value in block.items():
+        v = _parse_int(value) if parse else (value if isinstance(value, (int, float)) else None)
+        if v is not None:
+            out[key] = v
+    return out
+
+
+def _item_perf_row(item: dict[str, Any], account: str, captured: str) -> dict[str, Any]:
+    """One 作品分析 item → canonical row with early-retention metrics. Pure → testable."""
+    aweme_id = item.get("item_id")
+    metrics = {
+        "plays": _parse_int(item.get("play_count")),
+        "avg_watch_duration_s": _round_or_none(item.get("average_play_duration")),
+        "completion_rate_5s_pct": _frac_pct(item.get("completion_rate_5s")),
+        "bounce_rate_2s_pct": _frac_pct(item.get("bounce_rate_2s")),
+    }
+    row = schema.video_row(
+        platform="douyin", account=account, content_id=aweme_id,
+        title=item.get("title"), published_at=item.get("publish_time") or None,
+        captured_at=captured,
+        source_url=f"https://www.douyin.com/video/{aweme_id}" if aweme_id else None,
+        metrics=metrics)
+    cover = _first_url(item.get("cover"))
+    if cover:
+        row["cover_url"] = cover
+    detail = {
+        "play_count_by_client": _client_split(item.get("play_count_per_client"), parse=True),
+        "avg_watch_duration_s_by_client": _client_split(item.get("average_play_duration_per_client"), parse=False),
+    }
+    detail = {k: v for k, v in detail.items() if v}
+    if detail:
+        row["detail"] = detail
+    return row
+
+
+def _overview_block(ov: dict[str, Any]) -> dict[str, Any]:
+    """Account-level 作品分析 overview → {key: {label, value, value_pct?}}."""
+    out: dict[str, Any] = {}
+    rate_keys = {"completion_rate_5s", "bounce_rate_2s", "cover_click_ratio"}
+    for key, cell in (ov or {}).items():
+        if not isinstance(cell, dict) or "metric_value" not in cell:
+            continue
+        entry = {"label": cell.get("metric_name"), "value": cell.get("metric_value")}
+        if key in rate_keys:
+            entry["value_pct"] = _frac_pct(cell.get("metric_value"))
+        out[key] = entry
+    return out
+
+
+def item_analysis(*, ws: Path, account: str, state_path: Path, days: int,
+                  chromium: str | None) -> dict[str, Any]:
+    return asyncio.run(_item_analysis(ws, account, state_path, days, chromium))
+
+
+async def _item_analysis(ws, account, state_path, days, chromium) -> dict[str, Any]:
+    if not state_path.exists():
+        raise CollectorError(f"missing Douyin storage state; run login/import-cookies first: {state_path}")
+    end = datetime.now(TZ)
+    start = end - timedelta(days=days)
+    start_s, end_s = _yyyymmdd(start), _yyyymmdd(end)
+    async_playwright = _import_playwright()
+    async with async_playwright() as p, _browser(p, chromium) as browser:
+        ctx = await browser.new_context(storage_state=str(state_path), **_CTX)
+        page = await ctx.new_page()
+        await page.goto("https://creator.douyin.com/creator-micro/data-center/content",
+                        wait_until="domcontentloaded", timeout=60000)
+        await _body_text_with_markers(
+            page, ("作品分析", "数据中心", "扫码登录", "验证码登录", "登录/注册"), timeout_ms=10000)
+        # Return raw response TEXT and parse in Python: a 19-digit item_id is a bare
+        # JSON number, and the browser's JSON.parse would round it to float64
+        # (…066994 → …067000). Python json keeps arbitrary-precision ints.
+        obj = await page.evaluate(
+            """async ({base, start, end, genres}) => {
+                const iv = await (await fetch(`${base}/involved_vertical?start_date=${start}&end_date=${end}`,
+                    {credentials:'same-origin'})).json();
+                const pv = (iv && iv.primary_verticals) || [];
+                const post = async (path, extra) => {
+                    const r = await fetch(`${base}/${path}`, {method:'POST',
+                        headers:{'content-type':'application/json'}, credentials:'same-origin',
+                        body: JSON.stringify({start_date:start, end_date:end, genres, primary_verticals:pv, ...extra})});
+                    return {status: r.status, text: await r.text()};
+                };
+                return {
+                    primary_verticals: pv,
+                    overview: await post('overview', {}),
+                    item_performance: await post('item_performance', {metric_type:1}),
+                };
+            }""",
+            {"base": _ITEM_ANALYSIS_BASE, "start": start_s, "end": end_s, "genres": _ITEM_GENRES})
+
+    def _parse_resp(label: str, resp: dict[str, Any]) -> dict[str, Any]:
+        status = resp.get("status", 0)
+        text = resp.get("text") or ""
+        try:
+            js = json.loads(text) if text else {}
+        except json.JSONDecodeError:
+            raise CollectorError(
+                f"Douyin item-analysis {label} returned non-JSON (status={status}); "
+                f"login may be expired — re-run login/import-cookies. prefix={text[:200]!r}")
+        err = _api_error(js)
+        if status >= 400 or err:
+            raise CollectorError(f"Douyin item-analysis {label} API error status={status} detail={err}")
+        return js
+
+    ov_js = _parse_resp("overview", obj.get("overview") or {})
+    ip_js = _parse_resp("item_performance", obj.get("item_performance") or {})
+
+    items = ip_js.get("items") or []
+    captured = datetime.now(TZ).isoformat()
+    rows = [_item_perf_row(it, account, captured) for it in items if isinstance(it, dict)]
+    rows.sort(key=lambda r: r.get("published_at") or "", reverse=True)
+
+    raw, processed = output_dirs(ws, account, "douyin")
+    stamp = _stamp()
+    result = {
+        "schema_version": schema.SCHEMA_VERSION,
+        "account": account, "platform": "douyin",
+        "source": "Douyin creator center /janus/douyin/creator/data/item_analysis",
+        "captured_at": captured,
+        "range": {"start": start_s, "end": end_s, "days": days},
+        "field_notes": {
+            "metrics.avg_watch_duration_s": "条均播放时长 (average watch seconds per play).",
+            "metrics.completion_rate_5s_pct": "5秒完播率 — early-retention proxy, percent.",
+            "metrics.bounce_rate_2s_pct": "2秒跳出率 — early-exit rate, percent.",
+            "coverage": "Batch overview of works published within [start, end] (5s完播/2s跳出/平均观看). "
+                        "For one work's full 完播率, 流量来源, 进度曲线 and 搜索词, use `douyin video-detail --aweme-id`.",
+        },
+        "account_overview": _overview_block(ov_js),
+        "item_count": len(rows),
+        "items": rows,
+    }
+    if not rows:
+        result["warning"] = ("no items returned — storage state may be expired, or no works were "
+                             "published in range; re-run login/import-cookies and widen --days")
+    jp = raw / f"douyin-item-analysis-{days}d-{stamp}.json"
+    mp = processed / f"douyin-item-analysis-{days}d-{stamp}.md"
+    jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    lines = [f"# {account} Douyin 作品分析 ({days} days)", "",
+             f"Range: {start_s} → {end_s}  ·  items: {len(rows)}", "",
+             "| Published | Work ID | Title | Play | 平均观看(s) | 5s完播% | 2s跳出% |",
+             "|---|---|---|---:|---:|---:|---:|"]
+    for r in rows:
+        m = r["metrics"]
+        title = (r.get("title") or "").replace("|", "/").replace("\n", " ")[:60]
+        pub = (r.get("published_at") or "")[:16]
+        lines.append(f"| {pub} | {r.get('content_id', '')} | {title} | "
+                     f"{_fmt(m.get('plays'))} | {_fmt(m.get('avg_watch_duration_s'))} | "
+                     f"{_fmt(m.get('completion_rate_5s_pct'))} | {_fmt(m.get('bounce_rate_2s_pct'))} |")
+    mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"ok": True, "json": str(jp), "markdown": str(mp), "items": len(rows)}
+
+
+# ── single-video detail (完播率 / 流量来源 / 进度 / 搜索词 / 同类对比) ──────
+#
+# The 作品分析 → 投稿列表 → 分析详情 page (work-detail/<aweme_id>) is where Douyin
+# exposes, per work, what the batch 投稿分析 cannot: full 完播率, the per-video
+# traffic-source split, drag-back/forward progress curves, the search terms that
+# surfaced the work, and a same-tier peer comparison.
+#
+# These endpoints reject a raw same-origin fetch (Douyin signs them with header
+# tokens its own interceptor adds), so — like `comments` — we navigate the real
+# page, click the 流量分析/观众分析 tabs to trigger the calls, and INTERCEPT the
+# responses. item_compare metric values are 0..1 fraction strings; `_pct_str`
+# normalizes them to percent.
+
+_DETAIL_TARGETS = {
+    "compare": "/data/diagnose/item_compare",
+    "source": "/data/item/play/source",
+    "progress": "/bff/data/progress/analysis/v2",
+    "search": "/data/item_analysis/search/keyword",
+    "portrait": "/data/fans/item/portrait",
+}
+
+# Douyin traffic-source keys → human labels; unknown keys pass through verbatim.
+_DY_SOURCE_LABELS = {
+    "homepage_hot": "推荐(首页推荐)", "follow": "关注", "homepage": "个人主页",
+    "search": "搜索", "message": "私信/分享", "familiar": "朋友/熟人",
+    "nearby": "同城", "other": "其他",
+}
+
+
+def _pct_str(value: Any) -> float | None:
+    """Douyin item_compare metric strings are 0..1 fractions → percent, 2dp."""
+    try:
+        return round(float(value) * 100, 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sec_str(value: Any) -> float | None:
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _source_rows(play_source: Any) -> list[dict[str, Any]]:
+    rows = []
+    for x in play_source or []:
+        if not isinstance(x, dict):
+            continue
+        key, pct = x.get("key"), _pct_str(x.get("value"))
+        if key is None or pct is None:
+            continue
+        rows.append({"source_key": str(key),
+                     "source_label": _DY_SOURCE_LABELS.get(str(key), str(key)),
+                     "share_pct": pct})
+    return sorted(rows, key=lambda r: -r["share_pct"])
+
+
+def _progress_curve(points: Any) -> list[dict[str, Any]]:
+    out = []
+    for x in points or []:
+        if not isinstance(x, dict):
+            continue
+        try:
+            sec = float(x.get("key"))
+        except (TypeError, ValueError):
+            continue
+        pct = _pct_str(x.get("value"))
+        if pct is None:
+            continue
+        out.append({"second": sec, "pct": pct})
+    return out
+
+
+def _portrait_block(portrait: Any) -> dict[str, Any]:
+    """Extract the readable slices of fans/item/portrait (ratios are 0..1)."""
+    if not isinstance(portrait, dict):
+        return {}
+
+    def _ratio_list(node: Any, top: int | None = None) -> list[dict[str, Any]]:
+        rows = (node or {}).get("ratio_list") if isinstance(node, dict) else None
+        out = []
+        for r in rows or []:
+            if isinstance(r, dict) and r.get("key") not in (None, ""):
+                out.append({"key": str(r["key"]), "pct": _pct_str(r.get("value"))})
+        out = [r for r in out if r["pct"] is not None]
+        out.sort(key=lambda r: -r["pct"])
+        return out[:top] if top else out
+
+    block = {
+        "gender": _ratio_list(portrait.get("gender")),
+        "age": _ratio_list(portrait.get("age")),
+        "top_provinces": _ratio_list(portrait.get("province"), top=8),
+        "city_level": _ratio_list(portrait.get("city_level")),
+    }
+    return {k: v for k, v in block.items() if v}
+
+
+def _peer_ids(compare: dict[str, Any]) -> list[str]:
+    """The same-tier works this video is benchmarked against. ``item_compare`` returns
+    only their ids/descriptions (no metrics — those would need a separate fetch)."""
+    ids = compare.get("compare_item_ids")
+    if isinstance(ids, list) and ids:
+        return [str(i) for i in ids if i not in (None, "")]
+    return [str(it.get("id")) for it in (compare.get("compare_items") or [])
+            if isinstance(it, dict) and it.get("id")]
+
+
+def _dy_detail_row(*, account: str, captured: str, aweme_id: str, compare: dict[str, Any],
+                   source: dict[str, Any], progress: dict[str, Any], search: dict[str, Any],
+                   portrait: dict[str, Any]) -> dict[str, Any]:
+    """Build one canonical single-video row + ``detail`` block. Pure → testable."""
+    item = (compare or {}).get("item") or {}
+    m = item.get("metrics") or {}
+    peer_ids = _peer_ids(compare or {})
+    metrics = {
+        "plays": _parse_int(m.get("view_count")),
+        "avg_watch_duration_s": _sec_str(m.get("avg_view_second")),
+        "completion_rate_pct": _pct_str(m.get("completion_rate")),
+        "completion_rate_5s_pct": _pct_str(m.get("completion_rate_5s")),
+        "bounce_rate_2s_pct": _pct_str(m.get("bounce_rate_2s")),
+        "avg_view_proportion_pct": _pct_str(m.get("avg_view_proportion")),
+        "cover_click_rate_pct": _pct_str(m.get("cover_click_rate")),
+        "follower_play_ratio_pct": _pct_str(m.get("fan_view_proportion")),
+    }
+    row = schema.video_row(
+        platform="douyin", account=account, content_id=aweme_id or None,
+        title=item.get("description") or None,
+        published_at=_iso(item.get("create_time")), captured_at=captured,
+        source_url=f"https://www.douyin.com/video/{aweme_id}" if aweme_id else None,
+        metrics={k: v for k, v in metrics.items() if v is not None})
+
+    engagement = {}
+    for label, key in (("like", "like_rate"), ("comment", "comment_rate"),
+                       ("share", "share_rate"), ("favorite", "favorite_rate"),
+                       ("subscribe", "subscribe_rate"), ("unsubscribe", "unsubscribe_rate")):
+        pct = _pct_str(m.get(key))
+        if pct is not None:
+            engagement[label] = pct
+
+    detail: dict[str, Any] = {
+        "traffic_source": _source_rows((source or {}).get("play_source")),
+        "progress_analysis": {
+            "drag_back_curve": _progress_curve((progress or {}).get("jump_backward")),
+            "drag_forward_curve": _progress_curve((progress or {}).get("jump_forward")),
+            "note": "Douyin exposes drag-back/forward distributions by playback second, "
+                    "not a plain 'still-watching' retention curve.",
+        },
+        "search_keywords": [
+            {"keyword": k.get("keyword"), "percent": k.get("percent")}
+            for k in ((search or {}).get("show_from") or []) if isinstance(k, dict) and k.get("keyword")
+        ],
+        "engagement_rates_pct": engagement,
+        "peer_comparison": {
+            "peer_count": len(peer_ids),
+            "peer_aweme_ids": peer_ids,
+            "note": "same-tier works Douyin benchmarks this one against; their metrics "
+                    "are not in this response — fetch each with douyin video-detail.",
+        },
+        "audience": _portrait_block(portrait),
+    }
+
+    def _clean(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            cleaned = {k: _clean(v) for k, v in obj.items()}
+            return {k: v for k, v in cleaned.items() if v not in (None, {}, [])}
+        return obj
+
+    row["detail"] = _clean(detail)
+    return row
+
+
+def video_detail(*, ws: Path, account: str, state_path: Path, aweme_id: str,
+                 chromium: str | None) -> dict[str, Any]:
+    return asyncio.run(_video_detail(ws, account, state_path, aweme_id, chromium))
+
+
+async def _video_detail(ws, account, state_path, aweme_id, chromium):
+    if not state_path.exists():
+        raise CollectorError(f"missing Douyin storage state; run login/import-cookies first: {state_path}")
+    grabbed: dict[str, Any] = {}
+    async_playwright = _import_playwright()
+    landing_body = ""
+    async with async_playwright() as p, _browser(p, chromium) as browser:
+        ctx = await browser.new_context(storage_state=str(state_path), **_CTX)
+        page = await ctx.new_page()
+
+        async def on_response(resp):
+            url = resp.url
+            for name, frag in _DETAIL_TARGETS.items():
+                if frag in url and name not in grabbed:
+                    try:
+                        grabbed[name] = await resp.json()
+                    except Exception:
+                        pass
+
+        page.on("response", on_response)
+        await page.goto(
+            f"https://creator.douyin.com/creator-micro/work-management/work-detail/{aweme_id}",
+            wait_until="domcontentloaded", timeout=60000)
+        landing_body = await _body_text_with_markers(
+            page, ("流量分析", "观众分析", "完播率", "扫码登录", "验证码登录", "登录/注册"), timeout_ms=12000)
+        # The default 数据概览 view fires item_compare on its own — wait for it BEFORE
+        # touching the tabs, or clicking 流量分析 navigates away before it lands.
+        for _ in range(15):
+            if "compare" in grabbed:
+                break
+            await page.wait_for_timeout(1000)
+        # The 流量分析/观众分析 tabs fire the rest. Click each (exact text, scrolled into
+        # view) and poll until its endpoints actually land — a bare click + fixed sleep
+        # silently missed them when the tab rendered slowly.
+        for label, needed in (("流量分析", ("source", "progress", "search")),
+                              ("观众分析", ("portrait",))):
+            try:
+                el = page.get_by_text(label, exact=True).first
+                if not await el.count():
+                    continue
+                await el.scroll_into_view_if_needed(timeout=3000)
+                await el.click(timeout=4000)
+            except Exception:
+                continue
+            for _ in range(8):
+                if all(n in grabbed for n in needed):
+                    break
+                await page.wait_for_timeout(1000)
+
+    if "compare" not in grabbed:
+        if _looks_like_login_page(landing_body):
+            raise CollectorError(
+                "Douyin single-video detail landed on a login page — storage state expired; "
+                "re-run login/import-cookies.")
+        raise CollectorError(
+            "could not load Douyin single-video analysis (item_compare) — wrong aweme_id, the "
+            "work is not yours, or Douyin changed work-detail. Update to the latest release or "
+            "report upstream (see AGENTS.md 'Staying current').")
+    # item_compare returns 200 with an empty item for a bogus/foreign aweme_id — guard
+    # against silently emitting a metric-less row.
+    _item_metrics = ((grabbed["compare"].get("item") or {}).get("metrics")) or {}
+    if not _item_metrics or _item_metrics.get("view_count") in (None, ""):
+        raise CollectorError(
+            f"Douyin returned no metrics for aweme_id {aweme_id} — wrong id, or the work is not "
+            "yours. Pass an aweme_id from `douyin worklist`/`item-analysis`.")
+
+    captured = datetime.now(TZ).isoformat()
+    row = _dy_detail_row(account=account, captured=captured, aweme_id=str(aweme_id),
+                         compare=grabbed.get("compare") or {}, source=grabbed.get("source") or {},
+                         progress=grabbed.get("progress") or {}, search=grabbed.get("search") or {},
+                         portrait=grabbed.get("portrait") or {})
+    result = {
+        "schema_version": schema.SCHEMA_VERSION,
+        "account": account, "platform": "douyin",
+        "source": "Douyin creator center 作品分析 → 分析详情 (work-detail) APIs",
+        "captured_at": captured,
+        "aweme_id": str(aweme_id),
+        "endpoints_seen": sorted(grabbed.keys()),
+        "field_notes": {
+            "metrics.completion_rate_pct": "完播率 — share who watched to the end, percent.",
+            "metrics.avg_watch_duration_s": "平均播放时长 (avg_view_second), seconds.",
+            "metrics.follower_play_ratio_pct": "粉丝播放占比 (fan_view_proportion), percent.",
+            "detail.traffic_source": "播放来源 split (推荐/关注/搜索/个人主页/…), percent shares.",
+            "detail.progress_analysis": "Drag-back/forward distribution by playback second (not a still-watching curve).",
+        },
+        "video": row,
+    }
+    raw, processed = output_dirs(ws, account, "douyin")
+    stamp = _stamp()
+    jp = raw / f"douyin-video-detail-{aweme_id}-{stamp}.json"
+    mp = processed / f"douyin-video-detail-{aweme_id}-{stamp}.md"
+    jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    mp.write_text(_render_dy_detail_md(row), encoding="utf-8")
+    m = row["metrics"]
+    return {"ok": True, "json": str(jp), "markdown": str(mp), "aweme_id": str(aweme_id),
+            "completion_rate_pct": m.get("completion_rate_pct"),
+            "avg_watch_duration_s": m.get("avg_watch_duration_s"),
+            "traffic_sources": len(row.get("detail", {}).get("traffic_source") or [])}
+
+
+def _render_dy_detail_md(row: dict[str, Any]) -> str:
+    m = row["metrics"]
+    d = row.get("detail") or {}
+    lines = [
+        f"# 单稿数据详情：{row.get('title') or row.get('content_id')}",
+        "",
+        f"- aweme_id: `{row.get('content_id')}`",
+        f"- 播放：{_fmt(m.get('plays'))}",
+        f"- 完播率：{m.get('completion_rate_pct', '—')}%",
+        f"- 平均观看时长：{m.get('avg_watch_duration_s', '—')} 秒",
+        f"- 5s完播率 / 2s跳出率：{m.get('completion_rate_5s_pct', '—')}% / {m.get('bounce_rate_2s_pct', '—')}%",
+        f"- 封面点击率：{m.get('cover_click_rate_pct', '—')}%",
+        f"- 粉丝播放占比：{m.get('follower_play_ratio_pct', '—')}%",
+        "",
+        "## 流量来源",
+        "",
+        "| 来源 | 占比 |",
+        "|---|---:|",
+    ]
+    for s in (d.get("traffic_source") or []):
+        lines.append(f"| {s['source_label']} | {s['share_pct']}% |")
+    kws = d.get("search_keywords") or []
+    if kws:
+        lines += ["", "## 搜索来源关键词", "",
+                  "、".join(f"{k['keyword']}({k['percent']}%)" for k in kws)]
+    return "\n".join(lines) + "\n"
+
+
 # ── per-video fan growth (粉丝增量) — DOM only ─────────────────────────────
 
 _FAN_COL = "粉丝增量"

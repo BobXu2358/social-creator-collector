@@ -26,6 +26,13 @@ Work metadata such as ``duration_s``, ``cover_url``, ``category``, ``tags``,
 ``is_original`` may appear when a platform returns it. Unclear platform-native
 fields can be preserved under ``platform_fields`` with notes at the command-result
 level.
+
+Per-video *detail* commands (``bilibili video-detail`` / ``douyin item-analysis``)
+add already-normalized percent/seconds metric keys — ``avg_watch_duration_s``,
+``avg_completion_pct``, ``completion_rate_5s_pct``, ``bounce_rate_2s_pct``,
+``follower_play_ratio_pct``, ``guest_play_ratio_pct`` — and a free-form ``detail``
+block (retention curve, audience split, terminal distribution, per-client splits).
+All additive: same ``SCHEMA_VERSION`` (consumers using ``.get()`` are unaffected).
 """
 from __future__ import annotations
 
