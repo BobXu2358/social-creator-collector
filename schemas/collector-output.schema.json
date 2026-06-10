@@ -82,7 +82,7 @@
         "source_url": { "type": ["string", "null"] },
         "metrics": {
           "type": "object",
-          "description": "Only keys that apply are present (absent = N/A). Standard keys below; platforms may add extras. Detail commands add per-video keys: avg_watch_duration_s (seconds); avg_completion_pct / completion_rate_5s_pct / bounce_rate_2s_pct / follower_play_ratio_pct / guest_play_ratio_pct (all percent, already normalized — bilibili from basis points, douyin from 0..1 fractions).",
+          "description": "Only keys that apply are present (absent = N/A). Standard keys below; platforms may add extras. Detail commands add per-video keys: avg_watch_duration_s (seconds); avg_completion_pct / completion_rate_5s_pct / bounce_rate_2s_pct / bounce_rate_3s_pct / follower_play_ratio_pct / guest_play_ratio_pct (all percent, already normalized — bilibili from basis points, douyin from 0..1 fractions). bounce_rate_3s_pct is Bilibili's 3秒跳出率 (first-14-days window). Bilibili exposes no impressions/clicks and randomizes absolute 封标点击率, so CTR appears only as relative signals under detail.click_through, never as an absolute metric key.",
           "properties": {
             "plays": { "type": "integer" },
             "likes": { "type": "integer" },

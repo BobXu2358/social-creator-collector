@@ -141,7 +141,7 @@ python -m collector <group> <action> --account <account> [options]
 | `bilibili login --account X` | QR scan login (headed browser) → credential file |
 | `bilibili probe --account X` | verify B站 login + identity (fails loud if cookie expired) |
 | `bilibili summary --account X --days 30` | fan trend + per-video play/fans/coin/reply/likes |
-| `bilibili video-detail --account X --bvid BVxxx` | single-video retention curve + completion + follower/guest split + audience |
+| `bilibili video-detail --account X --bvid BVxxx` | single-video retention curve + completion + follower/guest split + audience + 封标点击率 relative signals + 3秒跳出率 |
 | `bilibili fan-source --account X` | fan source distribution (video/search/space/etc.) |
 | `bilibili comments --account X --bvid BVxxx` | collect top-level video comments |
 | `bilibili danmaku --account X --bvid BVxxx` | fetch danmaku + density-peak analysis |
@@ -193,12 +193,22 @@ downstream tools against this shape, not against one command's incidental JSON.
   Douyin detail endpoints reject a raw fetch (the page signs them), so video-detail
   navigates work-detail and intercepts the responses — the same pattern as `comments`.
   All rate fields are pre-normalized to percent.
-- **Two platform quirks worth knowing.** Bilibili's `avg_completion_pct` is the mean
+- **Three platform quirks worth knowing.** Bilibili's `avg_completion_pct` is the mean
   watched fraction (avg progress ÷ duration), not the share who reached the end; its
   "播放量来源" is a *terminal* split (手机/PC/电视), not a recommend/search traffic source —
   Bilibili doesn't expose that per video. Douyin's `completion_rate_pct` (from video-detail)
   IS the real 完播率, and Douyin's "retention" is exposed as drag-back/forward distributions
   by playback second, not a plain still-watching curve.
+- **Bilibili CTR is relative-only — impressions/clicks don't exist.** The creator center
+  has 封标点击率 (cover+title CTR), but it exposes NO impression/click counts anywhere, and
+  it deliberately randomizes the absolute CTR fields (every `tm_*` rate in an API response
+  is rescaled by one random factor per response; the UI hides the digits behind an
+  obfuscated font). `bilibili video-detail` therefore emits only the stable signals in
+  `detail.click_through`: CTR vs same-tier peer median (e.g. 0.7×), fan/guest variants,
+  fan-vs-guest CTR ratio, percentile vs peers, and a 0-5 star rating — plus the stable
+  absolute `metrics.bounce_rate_3s_pct` (3秒跳出率) with its peer split in `detail.bounce_3s`.
+  Both cover only the first 14 days after publish (frozen afterwards). Don't try to recover
+  absolute CTR/impressions from Bilibili — the data is obfuscated at the source.
 - **B站 comments need a login cookie.** The anonymous/`x/v2/reply/wbi/main` endpoints
   return ~3 hot comments or trigger `412` — the collector uses `x/v2/reply/main` with cookie.
 - **Cookie expiry is the usual failure.** If a command returns empty or a login warning,

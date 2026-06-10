@@ -493,6 +493,29 @@ def _rate_pct(value: Any) -> float | None:
     return round(v / 100, 2)
 
 
+def _ratio(part: Any, base: Any) -> float | None:
+    """``part / base`` rounded to 2dp; ``None`` when either side is missing/zero.
+
+    Used for the 封标点击率 (cover/title CTR) signals: Bilibili rescales every
+    ``tm_*`` rate in a response by one random factor, so absolute values are
+    meaningless but ratios between fields of the SAME response are stable.
+    """
+    try:
+        a, b = float(part), float(base)
+    except (TypeError, ValueError):
+        return None
+    return round(a / b, 2) if b > 0 else None
+
+
+def _stars(value: Any) -> float | None:
+    """Creator-center star ratings are tenths (20 → 2.0 stars, out of 5)."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(v / 10, 1) if v > 0 else None
+
+
 def _share_pct(part: Any, other: Any) -> float | None:
     """``part`` as a percent of ``part + other``. Unit-agnostic — works whether the
     creator center hands back raw play counts or basis points (some archives return
@@ -582,6 +605,7 @@ def _bili_detail_row(*, account: str, captured: str, view: dict[str, Any],
     aud = (overview or {}).get("audience_proportion") or {}
     assistant = (play_analyze or {}).get("viewer_assistant") or {}
     arc = (play_analyze or {}).get("arc_audience") or {}
+    gi = (play_analyze or {}).get("guest_interact") or {}
     bvid = str(view.get("bvid") or "")
     duration_s = _duration_seconds(view.get("duration"))
     pub = _date_from_epoch(view.get("pubtime"))
@@ -611,6 +635,7 @@ def _bili_detail_row(*, account: str, captured: str, view: dict[str, Any],
         "avg_completion_pct": _rate_pct(quit_info.get("full_play_ratio")),
         "follower_play_ratio_pct": follower_pct,
         "guest_play_ratio_pct": guest_pct,
+        "bounce_rate_3s_pct": _rate_pct(gi.get("crash_rate")),
     }
     row = schema.video_row(
         platform="bilibili", account=account, content_id=bvid or None,
@@ -650,6 +675,30 @@ def _bili_detail_row(*, account: str, captured: str, view: dict[str, Any],
         "vs_peers": {
             "play_pass_rate_percentile_pct": _rate_pct(arc.get("play_viewer_pass_rate")),
         },
+        # 封标点击率 (cover/title CTR). Bilibili exposes NO impressions/clicks, and it
+        # deliberately randomizes the absolute tm_* rates (one random factor per API
+        # response; the UI hides the digits behind an obfuscated font). Ratios within
+        # a single response and the percentile/star fields ARE stable, so only those
+        # are emitted. Window: first 14 days after publish, frozen afterwards.
+        "click_through": {
+            "ctr_vs_peer_median": _ratio(gi.get("tm_rate"), gi.get("tm_rate_med")),
+            "fan_ctr_vs_peer_median": _ratio(gi.get("tm_fan_rate"), gi.get("tm_fan_simi_rate_med")),
+            "guest_ctr_vs_peer_median": _ratio(gi.get("tm_viewer_rate"), gi.get("tm_viewer_simi_rate_med")),
+            "fan_vs_guest_ctr_ratio": _ratio(gi.get("tm_fan_rate"), gi.get("tm_viewer_rate")),
+            "vs_peers_percentile_pct": _rate_pct(gi.get("tm_pass_rate")),
+            "fan_vs_peers_percentile_pct": _rate_pct(gi.get("tm_fan_pass_rate")),
+            "guest_vs_peers_percentile_pct": _rate_pct(gi.get("tm_viewer_pass_rate")),
+            "stars": _stars(gi.get("tm_star")),
+        },
+        # 3秒跳出率 — stable absolute rates, same 14-day window as click_through.
+        "bounce_3s": {
+            "bounce_rate_3s_pct": _rate_pct(gi.get("crash_rate")),
+            "fan_bounce_rate_3s_pct": _rate_pct(gi.get("crash_fan_rate")),
+            "guest_bounce_rate_3s_pct": _rate_pct(gi.get("crash_viewer_rate")),
+            "peer_median_bounce_rate_3s_pct": _rate_pct(gi.get("crash_rate_med")),
+            "vs_peers_percentile_pct": _rate_pct(gi.get("crash_pass_rate")),
+            "stars": _stars(gi.get("crash_star")),
+        },
     }
     ptf = (trans or {}).get("play_trans_fan") or {}
     if ptf:
@@ -675,6 +724,16 @@ def _detail_field_notes() -> dict[str, str]:
         "metrics.avg_completion_pct": "Average watched fraction = avg_play_progress / duration, percent. "
                                       "This is mean completion, NOT the share of viewers who reached the end.",
         "metrics.follower_play_ratio_pct / guest_play_ratio_pct": "Share of plays from followers vs non-followers, percent.",
+        "metrics.bounce_rate_3s_pct": "3秒跳出率 — share of viewers who left within the first 3 seconds, percent. "
+                                      "Counts only the first 14 days after publish (frozen afterwards).",
+        "detail.click_through": "封标点击率 (cover+title CTR) signals. Bilibili does NOT expose impressions/clicks, "
+                                "and absolute CTR values are deliberately randomized per API response (all tm_* rates "
+                                "share one random factor each response; the creator-center UI hides the digits too). "
+                                "Therefore only stable signals are emitted: ctr_vs_peer_median (your CTR ÷ same-tier "
+                                "peer median, e.g. 0.70 = 70% of peers' median), fan/guest variants, fan_vs_guest_ctr_ratio, "
+                                "percentile vs peers, and the 0-5 star rating. 14-day window. There is no way to get "
+                                "absolute impressions/clicks/CTR from the Bilibili creator center.",
+        "detail.bounce_3s": "3-second bounce split (overall/fan/guest) + same-tier peer median and percentile.",
         "detail.retention_curve": "[{second, retained_pct}] — share still watching at each playback second.",
         "detail.completion.vs_peers_percentile_pct": "Percentile vs same-tier peers (higher = better than more peers).",
         "detail.terminal_distribution": "Plays by client/terminal (Bilibili '播放量来源' is terminal split, "
@@ -732,6 +791,8 @@ def video_detail(*, ws: Path, account: str, credential_path: Path, bvid: str,
     return {"ok": True, "json": str(jp), "markdown": str(mp), "bvid": row["content_id"],
             "avg_watch_duration_s": m.get("avg_watch_duration_s"),
             "avg_completion_pct": m.get("avg_completion_pct"),
+            "bounce_rate_3s_pct": m.get("bounce_rate_3s_pct"),
+            "ctr_vs_peer_median": (row.get("detail", {}).get("click_through") or {}).get("ctr_vs_peer_median"),
             "retention_points": len(row.get("detail", {}).get("retention_curve") or [])}
 
 
@@ -758,6 +819,23 @@ def _render_detail_md(row: dict[str, Any]) -> str:
     peer = {p["second"]: p["retained_pct"] for p in (d.get("peer_retention_curve") or [])}
     for p in (d.get("retention_curve") or []):
         lines.append(f"| {p['second']} | {p['retained_pct']} | {peer.get(p['second'], '')} |")
+    ct = d.get("click_through") or {}
+    if ct:
+        lines += ["", "## 封标点击率（14天窗口；B站不出绝对值，仅相对信号）", ""]
+        if ct.get("ctr_vs_peer_median") is not None:
+            lines.append(f"- 相对同类中位数：{ct['ctr_vs_peer_median']}×"
+                         + (f"（粉丝 {ct['fan_ctr_vs_peer_median']}× / 游客 {ct['guest_ctr_vs_peer_median']}×）"
+                            if ct.get("fan_ctr_vs_peer_median") is not None else ""))
+        if ct.get("vs_peers_percentile_pct") is not None:
+            lines.append(f"- 超过 {ct['vs_peers_percentile_pct']}% 同类稿件")
+        if ct.get("stars") is not None:
+            lines.append(f"- 评级：{ct['stars']}/5 星")
+    b3 = d.get("bounce_3s") or {}
+    if b3.get("bounce_rate_3s_pct") is not None:
+        line = f"- 3秒跳出率：{b3['bounce_rate_3s_pct']}%"
+        if b3.get("peer_median_bounce_rate_3s_pct") is not None:
+            line += f"（同类中位 {b3['peer_median_bounce_rate_3s_pct']}%）"
+        lines += ["", "## 3秒跳出率（14天窗口）", "", line]
     terminals = d.get("terminal_distribution") or []
     if terminals:
         lines += ["", "## 播放量来源（终端）", "",
