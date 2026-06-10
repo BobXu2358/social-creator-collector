@@ -615,7 +615,18 @@ _BILI_OVERVIEW = {
     "viewer_ty": [{"tag_name": "单机游戏", "count": 800}, {"tag_name": "主机", "count": 200}],
 }
 _BILI_PLAY = {"viewer_assistant": {"play_fan_rate": 5789, "play_viewer_rate": 4211},
-              "arc_audience": {"play_viewer_pass_rate": 4999}}
+              "arc_audience": {"play_viewer_pass_rate": 4999},
+              # 封标点击率 (tm_*): absolute values are randomized per response by
+              # Bilibili — only ratios within one response are meaningful. 3秒跳出率
+              # (crash_*) and the *_pass_rate/_star fields are stable basis points.
+              "guest_interact": {
+                  "tm_rate": 746, "tm_rate_med": 1058, "tm_fan_rate": 1453,
+                  "tm_fan_simi_rate_med": 1206, "tm_viewer_rate": 624,
+                  "tm_viewer_simi_rate_med": 963, "tm_pass_rate": 3242,
+                  "tm_fan_pass_rate": 6113, "tm_viewer_pass_rate": 3174, "tm_star": 20,
+                  "crash_rate": 3367, "crash_fan_rate": 3502, "crash_viewer_rate": 3249,
+                  "crash_rate_med": 2951, "crash_pass_rate": 6108, "crash_star": 29,
+              }}
 _BILI_GRAPH = {
     "viewer_quit": [{"duration_key": 30, "num": 7705}, {"duration_key": 60, "num": 6937}],
     "peer_viewer_quit": [{"duration_key": 30, "num": 7000}],
@@ -679,6 +690,37 @@ class PerVideoDetailHelpers(unittest.TestCase):
         term = d["terminal_distribution"]
         self.assertEqual([t["terminal"] for t in term], ["移动", "PC", "TV"])
         self.assertEqual(term[0]["share_pct"], 69.07)  # 9000/13030
+        # 3秒跳出率 is a stable absolute rate (basis points → percent)
+        self.assertEqual(m["bounce_rate_3s_pct"], 33.67)
+        self.assertEqual(d["bounce_3s"]["peer_median_bounce_rate_3s_pct"], 29.51)
+        self.assertEqual(d["bounce_3s"]["stars"], 2.9)
+        # 封标点击率: only response-internal ratios + percentile/stars (absolute
+        # tm values are randomized per response and must NOT be emitted)
+        ct = d["click_through"]
+        self.assertEqual(ct["ctr_vs_peer_median"], 0.71)        # 746/1058
+        self.assertEqual(ct["fan_vs_guest_ctr_ratio"], 2.33)    # 1453/624
+        self.assertEqual(ct["vs_peers_percentile_pct"], 32.42)
+        self.assertEqual(ct["stars"], 2.0)
+        for key in ct:
+            self.assertNotIn("ctr_pct", key)  # no absolute CTR key may appear
+
+    def test_bili_detail_row_omits_ctr_block_when_absent(self):
+        play = {"viewer_assistant": {"play_fan_rate": 5789, "play_viewer_rate": 4211},
+                "arc_audience": {"play_viewer_pass_rate": 4999}}
+        row = bilibili._bili_detail_row(
+            account="x", captured="c", view=_BILI_VIEW, overview=_BILI_OVERVIEW,
+            play_analyze=play, graph=_BILI_GRAPH, trans=_BILI_TRANS)
+        self.assertNotIn("bounce_rate_3s_pct", row["metrics"])
+        self.assertNotIn("click_through", row["detail"])
+        self.assertNotIn("bounce_3s", row["detail"])
+
+    def test_ratio_and_stars_guard_zero_and_garbage(self):
+        self.assertEqual(bilibili._ratio(746, 1058), 0.71)
+        self.assertIsNone(bilibili._ratio(746, 0))
+        self.assertIsNone(bilibili._ratio(None, 5))
+        self.assertEqual(bilibili._stars(29), 2.9)
+        self.assertIsNone(bilibili._stars(0))
+        self.assertIsNone(bilibili._stars("x"))
 
     def test_terminal_distribution_maps_labels_and_drops_zero(self):
         rows = bilibili._terminal_distribution(
