@@ -467,6 +467,23 @@ class PureParsers(unittest.TestCase):
         with self.assertRaises(CollectorError):
             douyin._overview_days_type(90)
 
+    def test_douyin_account_fan_total_from_user_info(self):
+        ok = {"json": {"status_code": 0, "user": {"follower_count": "1,234,567"}}}
+        self.assertEqual(douyin._account_fan_total_from_user_info(ok), 1234567)
+        top_level = {"json": {"follower_count": 88}}
+        self.assertEqual(douyin._account_fan_total_from_user_info(top_level), 88)
+        alt_container = {"json": {"user_info": {"fans_count": 12}}}
+        self.assertEqual(douyin._account_fan_total_from_user_info(alt_container), 12)
+        # error code, non-JSON body, missing field, zero kept as zero
+        self.assertIsNone(douyin._account_fan_total_from_user_info(
+            {"json": {"status_code": 8, "user": {"follower_count": 5}}}))
+        self.assertIsNone(douyin._account_fan_total_from_user_info(
+            {"status": 200, "textPrefix": "<html>login</html>"}))
+        self.assertIsNone(douyin._account_fan_total_from_user_info({"json": {"user": {}}}))
+        self.assertIsNone(douyin._account_fan_total_from_user_info({}))
+        self.assertEqual(douyin._account_fan_total_from_user_info(
+            {"json": {"user": {"follower_count": 0}}}), 0)
+
     def test_comments_no_api_diagnostics(self):
         diag = douyin._comments_no_api_diagnostics("扫码登录", 0)
         self.assertFalse(diag["comment_api_seen"])
@@ -572,6 +589,28 @@ class RetryBehavior(unittest.TestCase):
         self.assertEqual(extra["status"], "published")
         self.assertEqual(extra["copyright"], 1)
         self.assertTrue(extra["is_original"])
+
+    def test_account_fan_total_prefers_public_relation_stat(self):
+        client = _SeqClient([_Resp(200, {"code": 0, "data": {"follower": 23456, "following": 10}})])
+        self.assertEqual(bilibili._account_fan_total(client, 123), 23456)
+        self.assertEqual(client.calls, 1)
+
+    def test_account_fan_total_falls_back_to_nav_stat(self):
+        # relation/stat 404s → nav/stat answers; also the no-mid path goes straight there.
+        client = _SeqClient([_Resp(404), _Resp(200, {"code": 0, "data": {"follower": 99}})])
+        self.assertEqual(bilibili._account_fan_total(client, 123), 99)
+        self.assertEqual(client.calls, 2)
+        client = _SeqClient([_Resp(200, {"code": 0, "data": {"follower": 7}})])
+        self.assertEqual(bilibili._account_fan_total(client, None), 7)
+        self.assertEqual(client.calls, 1)
+
+    def test_account_fan_total_returns_none_when_unavailable(self):
+        client = _SeqClient([_Resp(404), _Resp(200, {"code": -101, "message": "not login"})])
+        self.assertIsNone(bilibili._account_fan_total(client, 123))
+        self.assertEqual(client.calls, 2)
+        # present-but-missing follower field → None, never a guessed 0
+        client = _SeqClient([_Resp(200, {"code": 0, "data": {}}), _Resp(200, {"code": 0, "data": {}})])
+        self.assertIsNone(bilibili._account_fan_total(client, 123))
 
     def test_retries_transient_then_succeeds(self):
         client = _SeqClient([httpx.ConnectError("boom"), _Resp(503),

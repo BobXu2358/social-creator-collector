@@ -320,6 +320,36 @@ def _archive_compare_by_bvid(client: httpx.Client, *, size: int = 50) -> dict[st
     return {str(it["bvid"]): it for it in items if isinstance(it, dict) and it.get("bvid")}
 
 
+def _account_fan_total(client: httpx.Client, mid: Any) -> int | None:
+    """Current account-level total follower count (账号当前粉丝总数).
+
+    Primary: the public relation stat — the same number the space page shows.
+    Fallback: nav/stat for the logged-in user. Returns ``None`` instead of failing
+    the whole command when both are unavailable; consumers must treat null as
+    "not captured", never as zero.
+    """
+    if mid:
+        try:
+            data = _get_json(
+                client, "https://api.bilibili.com/x/relation/stat",
+                {"vmid": mid}, retries=1, backoff_s=0.2,
+            ).get("data") or {}
+            if data.get("follower") is not None:
+                return int(data["follower"])
+        except (CollectorError, TypeError, ValueError):
+            pass
+    try:
+        data = _get_json(
+            client, "https://api.bilibili.com/x/web-interface/nav/stat",
+            retries=1, backoff_s=0.2,
+        ).get("data") or {}
+        if data.get("follower") is not None:
+            return int(data["follower"])
+    except (CollectorError, TypeError, ValueError):
+        pass
+    return None
+
+
 def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict[str, Any]:
     creds = load_credentials(credential_path)
     cookie = cookie_header(creds)
@@ -331,6 +361,7 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
             raise CollectorError(
                 "Bilibili cookie invalid or expired; re-export SESSDATA/bili_jct."
             )
+        account_fan_total = _account_fan_total(c, nav.get("mid"))
 
         fan_obj = _get_json(
             c,
@@ -413,8 +444,14 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
             "category": "Bilibili partition/category name when available.",
             "tags": "Public archive tags when the tag endpoint returns them; missing tags mean unavailable, not necessarily untagged.",
             "copyright": "Bilibili copyright value when available; 1 is treated as original and 2 as repost-like.",
+            "account_fan_total": "账号当前粉丝总数 — the account's CURRENT total follower count at capture "
+                                 "time (public relation stat, same number as the space page). "
+                                 "null = could not be captured, NOT zero.",
+            "fan_inc_total": "Net new fans summed over THIS window only (Σ fan_trend.fan_inc) — a period "
+                             "delta, not the account total. Replaces the misleadingly named fan_total.",
         },
-        "fan_total": sum(r["fan_inc"] for r in fan_rows),
+        "account_fan_total": account_fan_total,
+        "fan_inc_total": sum(r["fan_inc"] for r in fan_rows),
         "fan_trend": fan_rows,
         "videos": videos,
     }
@@ -428,7 +465,9 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
         f"# {account} Bilibili creator data ({days} days)",
         "",
         f"Range: {start.isoformat()} → {latest.isoformat()}",
-        f"Fan total: {result['fan_total']:,}",
+        f"Current fans (账号当前粉丝总数): {account_fan_total:,}" if account_fan_total is not None
+        else "Current fans (账号当前粉丝总数): unavailable",
+        f"Net new fans in range: {result['fan_inc_total']:,}",
         "",
         "## Daily fans",
         "",
@@ -454,7 +493,8 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
         )
     mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"ok": True, "json": str(jp), "markdown": str(mp),
-            "fan_total": result["fan_total"], "videos": len(videos)}
+            "account_fan_total": account_fan_total,
+            "fan_inc_total": result["fan_inc_total"], "videos": len(videos)}
 
 
 def _days(n: int):
