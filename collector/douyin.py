@@ -324,6 +324,59 @@ async def _login(state_path, chromium, timeout_s) -> dict[str, Any]:
     return {"ok": True, "storage_state": str(state_path), "method": "qr-login"}
 
 
+# ── account-level current fan total (账号当前粉丝总数) ─────────────────────
+#
+# The creator-center header/profile API exposes the account's CURRENT total
+# follower count. Fired from inside an already-open creator.douyin.com page
+# (same-origin, browser supplies login + signing), so any command that drives a
+# page can attach it. Failure degrades to None — the main collection must never
+# die because this side-channel did.
+
+_USER_INFO_URL = "/web/api/media/user/info/"
+
+_FETCH_JSON_JS = """async (url) => {
+    const r = await fetch(url, {credentials:'same-origin'});
+    const t = await r.text();
+    try { return {status:r.status, json:JSON.parse(t)}; }
+    catch(e) { return {status:r.status, textPrefix:t.slice(0,200)}; }
+}"""
+
+
+def _account_fan_total_from_user_info(obj: dict[str, Any]) -> int | None:
+    """Pull the current follower total out of a user-info response. Pure → testable.
+
+    Defensive about shape: looks in ``user`` / ``user_info`` containers and at the
+    top level, under the names Douyin has used for the count. ``None`` when the
+    response is an error, non-JSON, or simply lacks the field.
+    """
+    js = (obj or {}).get("json")
+    if not isinstance(js, dict):
+        return None
+    code = js.get("status_code", js.get("code", 0))
+    try:
+        if int(code) != 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+    for container in (js.get("user"), js.get("user_info"), js):
+        if not isinstance(container, dict):
+            continue
+        for key in ("follower_count", "fans_count", "total_fans"):
+            value = _parse_int(container.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+async def _fetch_account_fan_total(page) -> int | None:
+    """Best-effort 账号当前粉丝总数 from an open creator.douyin.com page."""
+    try:
+        obj = await page.evaluate(_FETCH_JSON_JS, _USER_INFO_URL)
+    except Exception:
+        return None
+    return _account_fan_total_from_user_info(obj or {})
+
+
 # ── work list (basic per-video metrics) ──────────────────────────────────
 
 def _pick(obj: dict[str, Any], *names: str) -> Any:
@@ -552,6 +605,7 @@ async def _fan_trend(ws, account, state_path, days, chromium) -> dict[str, Any]:
                 try { return {status:r.status, json:JSON.parse(t)}; }
                 catch(e) { return {status:r.status, textPrefix:t.slice(0,500)}; }
             }""", last_days_type)
+        account_fan_total = await _fetch_account_fan_total(page)
 
     js = obj.get("json") or {}
     err = _api_error(js)
@@ -572,7 +626,14 @@ async def _fan_trend(ws, account, state_path, days, chromium) -> dict[str, Any]:
         "captured_at": captured,
         "range": {"start": start, "end": end, "days": days, "last_days_type": last_days_type},
         "metric_labels": _douyin_overview_metric_labels(),
-        "fan_total": sum(r["fan_inc"] for r in rows),
+        "field_notes": {
+            "account_fan_total": "账号当前粉丝总数 — the account's CURRENT total follower count at capture "
+                                 "time (creator-center user info API). null = could not be captured, NOT zero.",
+            "fan_inc_total": "Net new fans summed over THIS window only (Σ fan_trend.fan_inc) — a period "
+                             "delta, not the account total. Replaces the misleadingly named fan_total.",
+        },
+        "account_fan_total": account_fan_total,
+        "fan_inc_total": sum(r["fan_inc"] for r in rows),
         "fan_trend": rows,
     }
     jp = raw / f"douyin-fan-trend-{days}d-{stamp}.json"
@@ -580,7 +641,9 @@ async def _fan_trend(ws, account, state_path, days, chromium) -> dict[str, Any]:
     jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     lines = [f"# {account} Douyin fan trend ({days} days)", "",
              f"Range: {start} -> {end}",
-             f"Fan total: {result['fan_total']:,}", "",
+             f"Current fans (账号当前粉丝总数): {account_fan_total:,}" if account_fan_total is not None
+             else "Current fans (账号当前粉丝总数): unavailable",
+             f"Net new fans in range: {result['fan_inc_total']:,}", "",
              "| Date | Net fans | Unfollows | Profile views | Account searches | Post searches | Plays | Follower plays |",
              "|---|---:|---:|---:|---:|---:|---:|---:|"]
     for r in rows:
@@ -590,7 +653,8 @@ async def _fan_trend(ws, account, state_path, days, chromium) -> dict[str, Any]:
                      f"{_fmt(r.get('follower_plays'))} |")
     mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"ok": True, "json": str(jp), "markdown": str(mp),
-            "fan_total": result["fan_total"], "rows": len(rows)}
+            "account_fan_total": account_fan_total,
+            "fan_inc_total": result["fan_inc_total"], "rows": len(rows)}
 
 
 def _normalize_aweme(a: dict[str, Any]) -> dict[str, Any]:
@@ -643,6 +707,7 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
         await page.goto("https://creator.douyin.com/creator-micro/content/manage",
                         wait_until="domcontentloaded", timeout=60000)
         landing_body = await _body_text_with_markers(page, _WORKLIST_READY_MARKERS, timeout_ms=10000)
+        account_fan_total = await _fetch_account_fan_total(page)
         cursor = 0
         for pn in range(1, max_pages + 1):
             url = ("/janus/douyin/creator/pc/work_list?scene=star_atlas"
@@ -690,7 +755,10 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
         "source": "Douyin creator center /janus/douyin/creator/pc/work_list",
         "captured_at": captured,
         "range": {"days": days, "cutoff": cutoff.isoformat() if cutoff else None},
+        "account_fan_total": account_fan_total,
         "field_notes": {
+            "account_fan_total": "账号当前粉丝总数 — the account's CURRENT total follower count at capture "
+                                 "time (creator-center user info API). null = could not be captured, NOT zero.",
             "duration_s": "Video duration in seconds; Douyin work_list duration is normalized from milliseconds when needed.",
             "metrics.shares": "Uses the work_list share/share_count value as the display share count.",
             "platform_fields.forward": "Raw forward/forward_count value when present; semantics are not used as display shares.",
@@ -710,6 +778,8 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
     jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     lines = [f"# {account} Douyin worklist ({days or 'all'} days)", "",
              f"Captured at: {captured}",
+             f"Current fans (账号当前粉丝总数): {account_fan_total:,}" if account_fan_total is not None
+             else "Current fans (账号当前粉丝总数): unavailable",
              f"Items: {len(items_c)}; selected: {len(rows_c)}", "",
              "| Time | Work ID | Title | Duration | Play | Like | Comment | Share | Collect |",
              "|---|---|---|---:|---:|---:|---:|---:|---:|"]
@@ -723,6 +793,7 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
                      f"{_fmt(m.get('shares'))} | {_fmt(m.get('collects'))} |")
     mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"ok": True, "json": str(jp), "markdown": str(mp),
+            "account_fan_total": account_fan_total,
             "items": len(items_c), "selected": len(rows_c)}
 
 

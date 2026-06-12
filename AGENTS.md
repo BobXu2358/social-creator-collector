@@ -140,7 +140,7 @@ python -m collector <group> <action> --account <account> [options]
 | `init --account X` | create folder structure + example credential files |
 | `bilibili login --account X` | QR scan login (headed browser) → credential file |
 | `bilibili probe --account X` | verify B站 login + identity (fails loud if cookie expired) |
-| `bilibili summary --account X --days 30` | fan trend + per-video play/fans/coin/reply/likes |
+| `bilibili summary --account X --days 30` | account_fan_total (当前粉丝总数) + fan trend + per-video play/fans/coin/reply/likes |
 | `bilibili video-detail --account X --bvid BVxxx` | single-video retention curve + completion + follower/guest split + audience + 封标点击率 relative signals + 3秒跳出率 |
 | `bilibili fan-source --account X` | fan source distribution (video/search/space/etc.) |
 | `bilibili comments --account X --bvid BVxxx` | collect top-level video comments |
@@ -148,10 +148,10 @@ python -m collector <group> <action> --account <account> [options]
 | `douyin login --account X` | QR scan login (headed browser) → storage state |
 | `douyin check-cookies --account X` | validate a Cookie-Editor export's structure |
 | `douyin import-cookies --account X` | cookies → Playwright storage state + verify login |
-| `douyin worklist --account X --days 30` | creator-center work list + basic metrics |
+| `douyin worklist --account X --days 30` | creator-center work list + basic metrics + account_fan_total (当前粉丝总数) |
 | `douyin item-analysis --account X --days 30` | per-work avg watch time + 5s完播率 + 2s跳出率 (作品分析批量) |
 | `douyin video-detail --account X --aweme-id ID` | single-video 完播率 + 流量来源 + 进度曲线 + 搜索词 + 观众画像 (分析详情) |
-| `douyin fan-trend --account X --days 30` | daily net fans + related overview metrics |
+| `douyin fan-trend --account X --days 30` | daily net fans + related overview metrics + account_fan_total (当前粉丝总数) |
 | `douyin fan-growth --account X` | **per-video 粉丝增量** from 投稿列表 DOM |
 | `douyin comments --account X --aweme-id ID` | collect video comments |
 
