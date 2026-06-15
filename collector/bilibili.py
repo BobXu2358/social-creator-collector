@@ -5,11 +5,12 @@ the creator-center and comment APIs, so Bilibili stays a lightweight httpx path.
 ``SESSDATA``/``bili_jct`` prove the login session; ``buvid3`` is preserved when
 available but older valid credentials may not have it. Douyin can't — see ``douyin.py``.
 
-Commands: probe, summary, fan-source, comments, danmaku.
+Commands: probe, summary, video-detail, dynamics, fan-source, comments, danmaku.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import statistics
@@ -949,6 +950,229 @@ def fan_source(*, ws: Path, account: str, credential_path: Path) -> dict[str, An
     mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"ok": True, "json": str(jp), "markdown": str(mp),
             "source_total": result["source_total"], "sources": len(rows)}
+
+
+# ── dynamics (动态层; WBI-signed space feed) ──────────────────────────────
+#
+# The account's own dynamics — video posts, 图文/opus, plain text, forwards and
+# 互动抽奖 — are where a chunk of account-level 涨粉 originates: a 转发抽奖 or a
+# post amplified by a big account shows up here, not in any per-video metric.
+# fan-source lumps all of it into the "other" entry bucket, so a 涨粉 spike with
+# no matching video is otherwise un-attributable. This command makes the dynamics
+# timeline itself legible, so a spike can be lined up against what was posted.
+#
+# The space feed is WBI-signed: each request must carry ``wts`` + a ``w_rid`` MD5
+# derived from the rotating img/sub keys in /x/web-interface/nav. Without it B站
+# returns business code 4101129 (risk control). Keys are fetched once per run.
+
+_WBI_MIXIN_TAB = (
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
+    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
+    36, 20, 34, 44, 52,
+)
+
+
+def _wbi_mixin_key(img_key: str, sub_key: str) -> str:
+    """Derive the 32-char mixin key B站 uses to salt WBI signatures."""
+    raw = img_key + sub_key
+    return "".join(raw[i] for i in _WBI_MIXIN_TAB if i < len(raw))[:32]
+
+
+def _wbi_sign(params: dict[str, Any], img_key: str, sub_key: str,
+              *, wts: int | None = None) -> dict[str, Any]:
+    """Return ``params`` plus ``wts`` and the ``w_rid`` MD5 signature.
+
+    Pure given (params, keys, wts) — unit-tested offline. Keys sorted, values
+    URL-encoded, the mixin key appended before the MD5, matching B站's web client.
+    """
+    mixin = _wbi_mixin_key(img_key, sub_key)
+    signed = dict(params)
+    signed["wts"] = int(time.time()) if wts is None else int(wts)
+    query = "&".join(
+        f"{k}={urllib.parse.quote(str(signed[k]), safe='')}" for k in sorted(signed)
+    )
+    signed["w_rid"] = hashlib.md5((query + mixin).encode("utf-8")).hexdigest()
+    return signed
+
+
+_DYN_TYPE_LABELS = {
+    "DYNAMIC_TYPE_AV": "视频投稿",
+    "DYNAMIC_TYPE_WORD": "纯文字",
+    "DYNAMIC_TYPE_DRAW": "图文",
+    "DYNAMIC_TYPE_FORWARD": "转发",
+    "DYNAMIC_TYPE_ARTICLE": "专栏",
+    "DYNAMIC_TYPE_LIVE_RCMD": "直播",
+    "DYNAMIC_TYPE_PGC": "番剧/影视",
+}
+
+
+def _dynamic_is_lottery(dyn: dict[str, Any], desc: str) -> bool:
+    """互动抽奖 surfaces as an ``additional.lottery`` block; the winners-announcement
+    forward only carries 中奖 text. Catch both so a 抽奖 window is never missed."""
+    add = dyn.get("additional")
+    if isinstance(add, dict):
+        if "lottery" in add or str(add.get("type", "")).endswith("LOTTERY"):
+            return True
+    return any(k in desc for k in ("互动抽奖", "转发抽奖", "抽奖", "中奖", "开奖"))
+
+
+def _dynamic_row(item: dict[str, Any]) -> dict[str, Any]:
+    """Normalize one space-feed item into a flat dynamic row (pure; testable)."""
+    modules = item.get("modules") or {}
+    author = modules.get("module_author") or {}
+    dyn = modules.get("module_dynamic") or {}
+    stat = modules.get("module_stat") or {}
+    dyn_type = item.get("type") or ""
+    published = _date_from_epoch(author.get("pub_ts"))
+    desc = ((dyn.get("desc") or {}).get("text") or "").strip()
+    major = dyn.get("major") or {}
+
+    # video投稿: pull bvid + title so a 涨粉 day lines up with which video dropped.
+    archive = major.get("archive") or {}
+    bvid = archive.get("bvid") or None
+    title = (archive.get("title") or "").strip() or None
+
+    # forward: keep the source so "转了谁 / 被谁带" stays visible.
+    forward_of = None
+    if dyn_type == "DYNAMIC_TYPE_FORWARD":
+        omod = (item.get("orig") or {}).get("modules") or {}
+        oauthor = omod.get("module_author") or {}
+        oarch = ((omod.get("module_dynamic") or {}).get("major") or {}).get("archive") or {}
+        opub = _date_from_epoch(oauthor.get("pub_ts"))
+        forward_of = {
+            "author": oauthor.get("name"),
+            "type": _DYN_TYPE_LABELS.get((item.get("orig") or {}).get("type"),
+                                         (item.get("orig") or {}).get("type")),
+            "published_at": opub.isoformat() if opub else None,
+            "title": (oarch.get("title") or "").strip() or None,
+        }
+        forward_of = {k: v for k, v in forward_of.items() if v}
+
+    return {
+        "dynamic_id": item.get("id_str"),
+        "type": dyn_type,
+        "type_label": _DYN_TYPE_LABELS.get(dyn_type, dyn_type),
+        "published_at": published.isoformat() if published else None,
+        "is_lottery": _dynamic_is_lottery(dyn, desc),
+        "is_forward": dyn_type == "DYNAMIC_TYPE_FORWARD",
+        "forward_of": forward_of or None,
+        "bvid": bvid,
+        "title": title,
+        "text": desc[:140] or None,
+        "stats": {
+            "forward": _stat_int(stat.get("forward") or {}, names=("count",)),
+            "comment": _stat_int(stat.get("comment") or {}, names=("count",)),
+            "like": _stat_int(stat.get("like") or {}, names=("count",)),
+        },
+    }
+
+
+def _pub_ts(item: dict[str, Any]) -> int | None:
+    raw = ((item.get("modules") or {}).get("module_author") or {}).get("pub_ts")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def dynamics(*, ws: Path, account: str, credential_path: Path, days: int,
+             max_pages: int, host_mid: str | None = None) -> dict[str, Any]:
+    creds = load_credentials(credential_path)
+    target = host_mid or creds.get("DedeUserID") or ""
+    referer = f"https://space.bilibili.com/{target}/dynamic"
+    cutoff = time.time() - days * 86400
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    with _client(cookie_header(creds), referer) as c:
+        nav = _get_json(c, "https://api.bilibili.com/x/web-interface/nav").get("data") or {}
+        if not nav.get("isLogin"):
+            raise CollectorError("Bilibili cookie invalid or expired; re-export SESSDATA/bili_jct.")
+        mid = host_mid or nav.get("mid")
+        if not mid:
+            raise CollectorError("no host mid (pass --host-mid, or re-login so DedeUserID is stored)")
+        wbi = nav.get("wbi_img") or {}
+        img = str(wbi.get("img_url", "")).rsplit("/", 1)[-1].split(".")[0]
+        sub = str(wbi.get("sub_url", "")).rsplit("/", 1)[-1].split(".")[0]
+        if not img or not sub:
+            raise CollectorError("Bilibili WBI keys missing from nav (cookie may be invalid)")
+
+        offset = ""
+        for _ in range(max_pages):
+            params: dict[str, Any] = {
+                "host_mid": mid, "timezone_offset": -480, "features": "itemOpusStyle",
+                "platform": "web", "web_location": "333.999",
+            }
+            if offset:
+                params["offset"] = offset
+            data = _get_json(
+                c, "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space",
+                params=_wbi_sign(params, img, sub),
+            ).get("data") or {}
+            items = data.get("items") or []
+            if not items:
+                break
+            for it in items:
+                pub = _pub_ts(it)
+                if pub is not None and pub < cutoff:
+                    continue            # filter, don't break — a 置顶 old post can lead a page
+                did = str(it.get("id_str") or "")
+                if did and did in seen:
+                    continue
+                seen.add(did)
+                rows.append(_dynamic_row(it))
+            last_pub = _pub_ts(items[-1])
+            offset = data.get("offset") or ""
+            if not data.get("has_more") or not offset or (last_pub is not None and last_pub < cutoff):
+                break
+            time.sleep(0.5)
+
+    rows.sort(key=lambda r: r.get("published_at") or "", reverse=True)
+    by_type: dict[str, int] = {}
+    for r in rows:
+        by_type[r["type_label"]] = by_type.get(r["type_label"], 0) + 1
+    lottery = [r for r in rows if r["is_lottery"]]
+    captured = datetime.now(TZ).isoformat()
+    raw, processed = output_dirs(ws, account, "bilibili")
+    stamp = _stamp()
+    result = {
+        "schema_version": schema.SCHEMA_VERSION,
+        "account": account,
+        "platform": "bilibili",
+        "source": "Bilibili /x/polymer/web-dynamic/v1/feed/space (WBI-signed)",
+        "captured_at": captured,
+        "host_mid": str(mid),
+        "window_days": days,
+        "count": len(rows),
+        "by_type": by_type,
+        "lottery_count": len(lottery),
+        "dynamics": rows,
+    }
+    jp = raw / f"bilibili-dynamics-{days}d-{stamp}.json"
+    mp = processed / f"bilibili-dynamics-{days}d-{stamp}.md"
+    jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    lines = [f"# {account} Bilibili dynamics ({days} days)", "",
+             f"Captured at: {captured}", f"Host mid: {mid}",
+             f"Count: {len(rows)}  ·  lottery posts: {len(lottery)}", "",
+             "| Published | Type | F/C/L | Flags | Content |",
+             "|---|---|---|---|---|"]
+    for r in rows:
+        when = (r["published_at"] or "")[:16].replace("T", " ")
+        s = r["stats"]
+        flags = []
+        if r["is_lottery"]:
+            flags.append("🎲抽奖")
+        if r["is_forward"] and r.get("forward_of"):
+            flags.append(f"↩{r['forward_of'].get('author', '')}")
+        content = r.get("title") or r.get("text") or ""
+        content = content.replace("\n", " ").replace("|", "\\|")[:48]
+        lines.append(
+            f"| {when} | {r['type_label']} | {s['forward']}/{s['comment']}/{s['like']} "
+            f"| {' '.join(flags)} | {content} |")
+    mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"ok": True, "json": str(jp), "markdown": str(mp),
+            "host_mid": str(mid), "count": len(rows), "lottery_count": len(lottery)}
 
 
 # ── comments ─────────────────────────────────────────────────────────────

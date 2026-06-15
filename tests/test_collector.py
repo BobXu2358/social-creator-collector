@@ -906,5 +906,77 @@ class SchemaConformance(unittest.TestCase):
             "fan_trend_row")
 
 
+class BilibiliDynamics(unittest.TestCase):
+    def test_wbi_mixin_key_is_32_chars_from_input(self):
+        mk = bilibili._wbi_mixin_key("a" * 32, "b" * 32)
+        self.assertEqual(len(mk), 32)
+        self.assertTrue(set(mk) <= {"a", "b"})
+        # deterministic
+        self.assertEqual(mk, bilibili._wbi_mixin_key("a" * 32, "b" * 32))
+
+    def test_wbi_sign_is_deterministic_and_sensitive(self):
+        img, sub = "7cd084941338484aae1ad9425b84077c", "4932caff0ff746eab6f01bf08b70ac45"
+        a = bilibili._wbi_sign({"host_mid": 123, "foo": "bar"}, img, sub, wts=1700000000)
+        b = bilibili._wbi_sign({"foo": "bar", "host_mid": 123}, img, sub, wts=1700000000)
+        self.assertEqual(a["wts"], 1700000000)
+        self.assertEqual(len(a["w_rid"]), 32)
+        self.assertTrue(all(ch in "0123456789abcdef" for ch in a["w_rid"]))
+        self.assertEqual(a["w_rid"], b["w_rid"])          # key order independent
+        c = bilibili._wbi_sign({"host_mid": 124, "foo": "bar"}, img, sub, wts=1700000000)
+        self.assertNotEqual(a["w_rid"], c["w_rid"])       # param change changes signature
+
+    def test_dynamic_row_video_post(self):
+        row = bilibili._dynamic_row({
+            "id_str": "111", "type": "DYNAMIC_TYPE_AV",
+            "modules": {
+                "module_author": {"pub_ts": 1748500000},
+                "module_dynamic": {"major": {"archive": {"bvid": "BV1xx", "title": " 标题 "}}},
+                "module_stat": {"forward": {"count": 10}, "comment": {"count": 309},
+                                "like": {"count": 1078}},
+            },
+        })
+        self.assertEqual(row["type_label"], "视频投稿")
+        self.assertEqual(row["bvid"], "BV1xx")
+        self.assertEqual(row["title"], "标题")
+        self.assertEqual(row["stats"], {"forward": 10, "comment": 309, "like": 1078})
+        self.assertFalse(row["is_lottery"])
+        self.assertIsNone(row["forward_of"])
+
+    def test_dynamic_row_forward_lottery_winners(self):
+        row = bilibili._dynamic_row({
+            "id_str": "222", "type": "DYNAMIC_TYPE_FORWARD",
+            "modules": {
+                "module_author": {"pub_ts": 1749700000},
+                "module_dynamic": {"desc": {"text": "恭喜@A@B等4位同学中奖，详情请点击抽奖查看。"}},
+                "module_stat": {"forward": {"count": 1}, "comment": {"count": 10},
+                                "like": {"count": 78}},
+            },
+            "orig": {"type": "DYNAMIC_TYPE_DRAW",
+                     "modules": {"module_author": {"name": "差评游戏部", "pub_ts": 1747017600}}},
+        })
+        self.assertTrue(row["is_lottery"])
+        self.assertTrue(row["is_forward"])
+        self.assertEqual(row["forward_of"]["author"], "差评游戏部")
+        self.assertEqual(row["forward_of"]["type"], "图文")
+        self.assertEqual(row["forward_of"]["published_at"],
+                         bilibili._date_from_epoch(1747017600).isoformat())
+
+    def test_dynamic_row_lottery_via_additional_block(self):
+        row = bilibili._dynamic_row({
+            "id_str": "333", "type": "DYNAMIC_TYPE_DRAW",
+            "modules": {
+                "module_author": {"pub_ts": 1747017600},
+                "module_dynamic": {"desc": {"text": "新视频抽奖"},
+                                   "additional": {"type": "ADDITIONAL_TYPE_LOTTERY",
+                                                  "lottery": {"lottery_id": 9}}},
+            },
+        })
+        self.assertTrue(row["is_lottery"])
+
+    def test_dynamic_is_lottery_plain_post_false(self):
+        self.assertFalse(bilibili._dynamic_is_lottery({"desc": {"text": "今天玩了个新游戏"}},
+                                                      "今天玩了个新游戏"))
+
+
 if __name__ == "__main__":
     unittest.main()
