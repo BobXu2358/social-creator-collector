@@ -109,7 +109,11 @@
         "account": { "type": "string" },
         "date": { "type": "string", "description": "YYYY-MM-DD" },
         "fan_inc": { "type": "integer", "description": "net fan change that day (涨粉)" },
-        "captured_at": { "type": "string" }
+        "captured_at": { "type": "string" },
+        "fan_total_on_date": {
+          "type": "integer",
+          "description": "Douyin overview data only: account follower total for this date, from data.fans.option_list. This is not follower plays."
+        }
       },
       "additionalProperties": true
     }

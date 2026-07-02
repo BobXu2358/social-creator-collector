@@ -532,7 +532,7 @@ _OVERVIEW_RELATED_SERIES = {
     "account_search": ("account_searches", "account searches"),
     "post_search": ("post_searches", "post searches"),
     "play": ("plays", "plays"),
-    "fans": ("follower_plays", "follower plays"),
+    "fans": ("fan_total_on_date", "daily fan total"),
     "digg": ("likes", "likes"),
     "comment": ("comments", "comments"),
     "share": ("shares", "shares"),
@@ -644,13 +644,13 @@ async def _fan_trend(ws, account, state_path, days, chromium) -> dict[str, Any]:
              f"Current fans (账号当前粉丝总数): {account_fan_total:,}" if account_fan_total is not None
              else "Current fans (账号当前粉丝总数): unavailable",
              f"Net new fans in range: {result['fan_inc_total']:,}", "",
-             "| Date | Net fans | Unfollows | Profile views | Account searches | Post searches | Plays | Follower plays |",
+             "| Date | Net fans | Fan total on date | Unfollows | Profile views | Account searches | Post searches | Plays |",
              "|---|---:|---:|---:|---:|---:|---:|---:|"]
     for r in rows:
-        lines.append(f"| {r['date']} | {_fmt(r['fan_inc'])} | {_fmt(r.get('unfollow_count'))} | "
+        lines.append(f"| {r['date']} | {_fmt(r['fan_inc'])} | {_fmt(r.get('fan_total_on_date'))} | "
+                     f"{_fmt(r.get('unfollow_count'))} | "
                      f"{_fmt(r.get('profile_views'))} | {_fmt(r.get('account_searches'))} | "
-                     f"{_fmt(r.get('post_searches'))} | {_fmt(r.get('plays'))} | "
-                     f"{_fmt(r.get('follower_plays'))} |")
+                     f"{_fmt(r.get('post_searches'))} | {_fmt(r.get('plays'))} |")
     mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"ok": True, "json": str(jp), "markdown": str(mp),
             "account_fan_total": account_fan_total,

@@ -177,7 +177,7 @@ downstream tools against this shape, not against one command's incidental JSON.
 - **Douyin account-level daily net fans do have a creator-center overview API.**
   `douyin fan-trend --days 30` reads `new_fans.option_list` from that API; this is the
   right input for campaign lift analysis. It also carries related daily overview metrics
-  (profile visits, account/work searches, plays, follower plays, likes/comments/shares,
+  (daily fan total, profile visits, account/work searches, plays, likes/comments/shares,
   unfollows). It is not a local snapshot system.
 - **Bilibili fan source is a direct creator-center source split.** `bilibili fan-source`
   emits counts for buckets like video/search/space/recommend/live/other; use it as a

@@ -452,13 +452,18 @@ class PureParsers(unittest.TestCase):
         self.assertEqual(rows[0]["schema_version"], schema.SCHEMA_VERSION)
         self.assertEqual(rows[0]["platform"], "douyin")
         self.assertEqual(rows[0]["fan_inc"], 1234)
-        self.assertEqual(rows[0]["follower_plays"], 83000)
+        self.assertIn("fan_total_on_date", rows[0])
+        self.assertEqual(rows[0]["fan_total_on_date"], 83000)
+        self.assertNotIn("follower_plays", rows[0])
         self.assertEqual(rows[0]["profile_views"], 1111)
         self.assertEqual(rows[0]["account_searches"], 33)
         self.assertEqual(rows[0]["post_searches"], 55)
         self.assertEqual(rows[0]["unfollow_count"], 12)
         self.assertEqual(rows[0]["fan_inc_last_day_incr_rate"], "+10%")
         self.assertEqual(rows[1]["fan_inc"], 2883)
+        labels = douyin._douyin_overview_metric_labels()
+        self.assertEqual(labels["fan_total_on_date"], "daily fan total")
+        self.assertNotIn("follower_plays", labels)
 
     def test_douyin_fan_trend_days_type(self):
         self.assertEqual(douyin._overview_days_type(7), 1)
@@ -493,6 +498,9 @@ class PureParsers(unittest.TestCase):
 
 
 class CanonicalSchema(unittest.TestCase):
+    def test_schema_version_tracks_breaking_fan_trend_rename(self):
+        self.assertEqual(schema.SCHEMA_VERSION, "2.0")
+
     def test_video_row_shape_and_null_metrics_dropped(self):
         row = schema.video_row(
             platform="bilibili", account="xgame", content_id="BV1xx", title="t",
