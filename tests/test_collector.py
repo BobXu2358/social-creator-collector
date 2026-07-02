@@ -498,6 +498,9 @@ class PureParsers(unittest.TestCase):
 
 
 class CanonicalSchema(unittest.TestCase):
+    def test_schema_version_tracks_breaking_fan_trend_rename(self):
+        self.assertEqual(schema.SCHEMA_VERSION, "2.0")
+
     def test_video_row_shape_and_null_metrics_dropped(self):
         row = schema.video_row(
             platform="bilibili", account="xgame", content_id="BV1xx", title="t",
