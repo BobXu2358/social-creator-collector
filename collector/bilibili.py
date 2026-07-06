@@ -5,11 +5,12 @@ the creator-center and comment APIs, so Bilibili stays a lightweight httpx path.
 ``SESSDATA``/``bili_jct`` prove the login session; ``buvid3`` is preserved when
 available but older valid credentials may not have it. Douyin can't — see ``douyin.py``.
 
-Commands: probe, summary, fan-source, comments, danmaku.
+Commands: probe, summary, video-detail, dynamics, fan-source, comments, danmaku.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import statistics
@@ -79,8 +80,27 @@ def _client(cookie: str | None = None, referer: str = "https://www.bilibili.com/
 _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
+def _safe_url_for_error(url: Any, *, redact_query: bool | tuple[str, ...] = False) -> str:
+    text = str(url)
+    if not redact_query:
+        return text
+    parts = urllib.parse.urlsplit(text)
+    if redact_query is True:
+        query = "<redacted>" if parts.query else ""
+    else:
+        redacted = set(redact_query)
+        pairs = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+        kept = [(k, v) for k, v in pairs if k not in redacted]
+        hidden = sorted({k for k, _ in pairs if k in redacted})
+        if hidden:
+            kept.append(("redacted", ",".join(hidden)))
+        query = urllib.parse.urlencode(kept)
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
+
+
 def _get_json(client: httpx.Client, url: str, params: dict[str, Any] | None = None,
-              *, retries: int = 3, backoff_s: float = 0.8) -> dict[str, Any]:
+              *, retries: int = 3, backoff_s: float = 0.8,
+              redact_query: bool | tuple[str, ...] = False) -> dict[str, Any]:
     """GET + parse Bilibili JSON, with bounded retry on *transient* failures only.
 
     Retries network errors (timeout / reset) and 429/5xx with exponential backoff.
@@ -98,18 +118,21 @@ def _get_json(client: httpx.Client, url: str, params: dict[str, Any] | None = No
             if resp.status_code in _RETRY_STATUS:
                 last = f"HTTP {resp.status_code}"
             elif resp.status_code >= 400:        # other 4xx (412/403/404…): do NOT hammer
-                raise CollectorError(f"Bilibili HTTP {resp.status_code} url={resp.url} — not retrying")
+                safe_url = _safe_url_for_error(resp.url, redact_query=redact_query)
+                raise CollectorError(f"Bilibili HTTP {resp.status_code} url={safe_url} — not retrying")
             else:
                 obj = resp.json()
                 code = obj.get("code")
                 if code not in (0, None):
+                    safe_url = _safe_url_for_error(resp.url, redact_query=redact_query)
                     raise CollectorError(
-                        f"Bilibili API error code={code} message={obj.get('message')!r} url={resp.url}"
+                        f"Bilibili API error code={code} message={obj.get('message')!r} url={safe_url}"
                     )
                 return obj
         if attempt < retries:
             time.sleep(backoff_s * (2 ** attempt))
-    raise CollectorError(f"Bilibili request to {url} failed after {retries + 1} attempts ({last})")
+    safe_url = _safe_url_for_error(url, redact_query=redact_query)
+    raise CollectorError(f"Bilibili request to {safe_url} failed after {retries + 1} attempts ({last})")
 
 
 def _stamp() -> str:
@@ -949,6 +972,288 @@ def fan_source(*, ws: Path, account: str, credential_path: Path) -> dict[str, An
     mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"ok": True, "json": str(jp), "markdown": str(mp),
             "source_total": result["source_total"], "sources": len(rows)}
+
+
+# ── dynamics (动态层; WBI-signed space feed) ──────────────────────────────
+
+_WBI_MIXIN_TAB = (
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
+    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
+    36, 20, 34, 44, 52,
+)
+_WBI_REDACT_QUERY = True
+_LOTTERY_TERMS = ("互动抽奖", "转发抽奖", "抽奖", "中奖", "开奖")
+
+
+def _wbi_mixin_key(img_key: str, sub_key: str) -> str:
+    raw = img_key + sub_key
+    return "".join(raw[i] for i in _WBI_MIXIN_TAB if i < len(raw))[:32]
+
+
+def _wbi_sign(params: dict[str, Any], img_key: str, sub_key: str,
+              *, wts: int | None = None) -> dict[str, Any]:
+    mixin = _wbi_mixin_key(img_key, sub_key)
+    signed = dict(params)
+    signed["wts"] = int(time.time()) if wts is None else int(wts)
+    query = "&".join(
+        f"{k}={urllib.parse.quote(str(signed[k]), safe='')}" for k in sorted(signed)
+    )
+    signed["w_rid"] = hashlib.md5((query + mixin).encode("utf-8")).hexdigest()
+    return signed
+
+
+def _wbi_keys(nav: dict[str, Any]) -> tuple[str, str]:
+    wbi = nav.get("wbi_img") or {}
+    img = str(wbi.get("img_url", "")).rsplit("/", 1)[-1].split(".")[0]
+    sub = str(wbi.get("sub_url", "")).rsplit("/", 1)[-1].split(".")[0]
+    if not img or not sub:
+        raise CollectorError("Bilibili WBI keys missing from nav (cookie may be invalid)")
+    return img, sub
+
+
+def _get_wbi_json(client: httpx.Client, url: str, params: dict[str, Any],
+                  keys: tuple[str, str]) -> dict[str, Any]:
+    return _get_json(
+        client, url, params=_wbi_sign(params, *keys), redact_query=_WBI_REDACT_QUERY,
+    )
+
+
+_DYN_TYPE_LABELS = {
+    "DYNAMIC_TYPE_AV": "视频投稿",
+    "DYNAMIC_TYPE_WORD": "纯文字",
+    "DYNAMIC_TYPE_DRAW": "图文",
+    "DYNAMIC_TYPE_FORWARD": "转发",
+    "DYNAMIC_TYPE_ARTICLE": "专栏",
+    "DYNAMIC_TYPE_LIVE_RCMD": "直播",
+    "DYNAMIC_TYPE_PGC": "番剧/影视",
+}
+
+
+def _dynamic_modules(item: dict[str, Any]) -> dict[str, Any]:
+    modules = item.get("modules") or {}
+    return modules if isinstance(modules, dict) else {}
+
+
+def _dynamic_payload(item: dict[str, Any]) -> dict[str, Any]:
+    dyn = _dynamic_modules(item).get("module_dynamic") or {}
+    return dyn if isinstance(dyn, dict) else {}
+
+
+def _dynamic_author(item: dict[str, Any]) -> dict[str, Any]:
+    author = _dynamic_modules(item).get("module_author") or {}
+    return author if isinstance(author, dict) else {}
+
+
+def _dynamic_stat(item: dict[str, Any]) -> dict[str, Any]:
+    stat = _dynamic_modules(item).get("module_stat") or {}
+    return stat if isinstance(stat, dict) else {}
+
+
+def _dynamic_text(dyn: dict[str, Any]) -> str:
+    desc = dyn.get("desc") or {}
+    if isinstance(desc, dict) and desc.get("text"):
+        return str(desc["text"]).strip()
+    return ""
+
+
+def _dynamic_major(dyn: dict[str, Any]) -> dict[str, Any]:
+    major = dyn.get("major") or {}
+    return major if isinstance(major, dict) else {}
+
+
+def _dynamic_major_title(major: dict[str, Any]) -> str | None:
+    for key in ("archive", "opus", "article", "pgc", "live_rcmd", "common"):
+        block = major.get(key)
+        if not isinstance(block, dict):
+            continue
+        title = _pick(block, "title", "desc", "name")
+        if title:
+            return str(title).strip() or None
+    return None
+
+
+def _dynamic_archive_bvid(major: dict[str, Any]) -> str | None:
+    archive = major.get("archive") or {}
+    if isinstance(archive, dict) and archive.get("bvid"):
+        return str(archive["bvid"])
+    return None
+
+
+def _dynamic_lottery_sources(dyn: dict[str, Any], *, prefix: str) -> list[str]:
+    sources: list[str] = []
+    add = dyn.get("additional")
+    if isinstance(add, dict) and ("lottery" in add or str(add.get("type", "")).endswith("LOTTERY")):
+        sources.append(f"{prefix}.additional")
+    text = _dynamic_text(dyn)
+    matched = [term for term in _LOTTERY_TERMS if term in text]
+    if matched:
+        sources.append(f"{prefix}.text:{'/'.join(matched[:3])}")
+    return sources
+
+
+def _dynamic_lottery(dyn: dict[str, Any], orig_dyn: dict[str, Any] | None = None) -> dict[str, Any]:
+    sources = _dynamic_lottery_sources(dyn, prefix="current")
+    if orig_dyn:
+        sources.extend(_dynamic_lottery_sources(orig_dyn, prefix="orig"))
+    return {"is_lottery": bool(sources), "lottery_sources": sources}
+
+
+def _dynamic_forward_source(orig: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(orig, dict):
+        return None
+    author = _dynamic_author(orig)
+    dyn = _dynamic_payload(orig)
+    published = _date_from_epoch(author.get("pub_ts"))
+    row = {
+        "author": author.get("name"),
+        "type": _DYN_TYPE_LABELS.get(orig.get("type"), orig.get("type")),
+        "published_at": published.isoformat() if published else None,
+        "title": _dynamic_major_title(_dynamic_major(dyn)),
+    }
+    return {k: v for k, v in row.items() if v} or None
+
+
+def _dynamic_row(item: dict[str, Any]) -> dict[str, Any]:
+    author = _dynamic_author(item)
+    stat = _dynamic_stat(item)
+    dyn = _dynamic_payload(item)
+    major = _dynamic_major(dyn)
+    orig = item.get("orig") if isinstance(item.get("orig"), dict) else None
+    orig_dyn = _dynamic_payload(orig) if orig else None
+    dyn_type = item.get("type") or ""
+    published = _date_from_epoch(author.get("pub_ts"))
+    lottery = _dynamic_lottery(dyn, orig_dyn)
+
+    return {
+        "dynamic_id": item.get("id_str"),
+        "type": dyn_type,
+        "type_label": _DYN_TYPE_LABELS.get(dyn_type, dyn_type),
+        "published_at": published.isoformat() if published else None,
+        "is_lottery": lottery["is_lottery"],
+        "lottery_sources": lottery["lottery_sources"],
+        "is_forward": dyn_type == "DYNAMIC_TYPE_FORWARD",
+        "forward_of": _dynamic_forward_source(orig),
+        "bvid": _dynamic_archive_bvid(major),
+        "title": _dynamic_major_title(major),
+        "text": _dynamic_text(dyn)[:140] or None,
+        "stats": {
+            "forward": _stat_int(stat.get("forward") or {}, names=("count",)),
+            "comment": _stat_int(stat.get("comment") or {}, names=("count",)),
+            "like": _stat_int(stat.get("like") or {}, names=("count",)),
+        },
+    }
+
+
+def _pub_ts(item: dict[str, Any]) -> int | None:
+    raw = _dynamic_author(item).get("pub_ts")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _dynamics_page_past_cutoff(items: list[dict[str, Any]], cutoff: float) -> bool:
+    page_pubs = [pub for pub in (_pub_ts(it) for it in items) if pub is not None]
+    return bool(page_pubs) and max(page_pubs) < cutoff
+
+
+def dynamics(*, ws: Path, account: str, credential_path: Path, days: int,
+             max_pages: int, host_mid: str | None = None) -> dict[str, Any]:
+    creds = load_credentials(credential_path)
+    target = host_mid or creds.get("DedeUserID") or ""
+    referer = f"https://space.bilibili.com/{target}/dynamic"
+    cutoff = time.time() - days * 86400
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    with _client(cookie_header(creds), referer) as c:
+        nav = _get_json(c, "https://api.bilibili.com/x/web-interface/nav").get("data") or {}
+        if not nav.get("isLogin"):
+            raise CollectorError("Bilibili cookie invalid or expired; re-export SESSDATA/bili_jct.")
+        mid = host_mid or nav.get("mid")
+        if not mid:
+            raise CollectorError("no host mid (pass --host-mid, or re-login so DedeUserID is stored)")
+        keys = _wbi_keys(nav)
+
+        offset = ""
+        for _ in range(max_pages):
+            params: dict[str, Any] = {
+                "host_mid": mid,
+                "timezone_offset": -480,
+                "features": "itemOpusStyle",
+                "platform": "web",
+                "web_location": "333.999",
+            }
+            if offset:
+                params["offset"] = offset
+            data = _get_wbi_json(
+                c, "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space",
+                params, keys,
+            ).get("data") or {}
+            items = [it for it in (data.get("items") or []) if isinstance(it, dict)]
+            if not items:
+                break
+            for it in items:
+                pub = _pub_ts(it)
+                if pub is not None and pub < cutoff:
+                    continue
+                did = str(it.get("id_str") or "")
+                if did:
+                    if did in seen:
+                        continue
+                    seen.add(did)
+                rows.append(_dynamic_row(it))
+            offset = data.get("offset") or ""
+            if not data.get("has_more") or not offset or _dynamics_page_past_cutoff(items, cutoff):
+                break
+            time.sleep(0.5)
+
+    rows.sort(key=lambda r: r.get("published_at") or "", reverse=True)
+    by_type: dict[str, int] = {}
+    for r in rows:
+        by_type[r["type_label"]] = by_type.get(r["type_label"], 0) + 1
+    lottery = [r for r in rows if r["is_lottery"]]
+    captured = datetime.now(TZ).isoformat()
+    raw, processed = output_dirs(ws, account, "bilibili")
+    stamp = _stamp()
+    result = {
+        "schema_version": schema.SCHEMA_VERSION,
+        "account": account,
+        "platform": "bilibili",
+        "source": "Bilibili /x/polymer/web-dynamic/v1/feed/space (WBI-signed)",
+        "captured_at": captured,
+        "host_mid": str(mid),
+        "window_days": days,
+        "count": len(rows),
+        "by_type": by_type,
+        "lottery_count": len(lottery),
+        "dynamics": rows,
+    }
+    jp = raw / f"bilibili-dynamics-{days}d-{stamp}.json"
+    mp = processed / f"bilibili-dynamics-{days}d-{stamp}.md"
+    jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    lines = [f"# {account} Bilibili dynamics ({days} days)", "",
+             f"Captured at: {captured}", f"Host mid: {mid}",
+             f"Count: {len(rows)}  ·  lottery posts: {len(lottery)}", "",
+             "| Published | Type | F/C/L | Flags | Content |",
+             "|---|---|---|---|---|"]
+    for r in rows:
+        when = (r["published_at"] or "")[:16].replace("T", " ")
+        s = r["stats"]
+        flags = []
+        if r["is_lottery"]:
+            flags.append("抽奖")
+        if r["is_forward"] and r.get("forward_of"):
+            flags.append(f"转发:{r['forward_of'].get('author', '')}")
+        content = r.get("title") or r.get("text") or ""
+        content = content.replace("\n", " ").replace("|", "\\|")[:48]
+        lines.append(
+            f"| {when} | {r['type_label']} | {s['forward']}/{s['comment']}/{s['like']} "
+            f"| {' '.join(flags)} | {content} |")
+    mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"ok": True, "json": str(jp), "markdown": str(mp),
+            "host_mid": str(mid), "count": len(rows), "lottery_count": len(lottery)}
 
 
 # ── comments ─────────────────────────────────────────────────────────────

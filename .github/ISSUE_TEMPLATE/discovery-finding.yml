@@ -79,7 +79,7 @@ body:
       description: Say what the fields appear to mean, and what is still ambiguous.
       placeholder: |
         - new_fans.option_list appears to be daily net new fans.
-        - fans.option_list may mean follower plays, not total fan count.
+        - fans.option_list appears to be daily fan total, not follower plays.
     validations:
       required: true
   - type: textarea

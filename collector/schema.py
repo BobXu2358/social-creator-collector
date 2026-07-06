@@ -42,7 +42,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "2.0"
 
 
 def video_row(*, platform: str, account: str, content_id: Any, title: str | None,

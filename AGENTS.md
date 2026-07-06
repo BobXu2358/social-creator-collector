@@ -143,6 +143,7 @@ python -m collector <group> <action> --account <account> [options]
 | `bilibili summary --account X --days 30` | account_fan_total (当前粉丝总数) + fan trend + per-video play/fans/coin/reply/likes |
 | `bilibili video-detail --account X --bvid BVxxx` | single-video retention curve + completion + follower/guest split + audience + 封标点击率 relative signals + 3秒跳出率 |
 | `bilibili fan-source --account X` | fan source distribution (video/search/space/etc.) |
+| `bilibili dynamics --account X --days 30` | 动态 timeline: 视频/图文/转发/互动抽奖 + forward source + lottery detection sources (WBI-signed space feed) |
 | `bilibili comments --account X --bvid BVxxx` | collect top-level video comments |
 | `bilibili danmaku --account X --bvid BVxxx` | fetch danmaku + density-peak analysis |
 | `douyin login --account X` | QR scan login (headed browser) → storage state |
@@ -177,11 +178,19 @@ downstream tools against this shape, not against one command's incidental JSON.
 - **Douyin account-level daily net fans do have a creator-center overview API.**
   `douyin fan-trend --days 30` reads `new_fans.option_list` from that API; this is the
   right input for campaign lift analysis. It also carries related daily overview metrics
-  (profile visits, account/work searches, plays, follower plays, likes/comments/shares,
+  (daily fan total, profile visits, account/work searches, plays, likes/comments/shares,
   unfollows). It is not a local snapshot system.
 - **Bilibili fan source is a direct creator-center source split.** `bilibili fan-source`
   emits counts for buckets like video/search/space/recommend/live/other; use it as a
   supporting input next to `summary`'s daily fan trend and per-video fan attribution.
+- **Bilibili dynamics covers the 动态层 fan-source can't split.** A chunk of account-level
+  涨粉 comes from posts, forwards, and 互动抽奖, not from any video — fan-source buckets it
+  all into "other". `bilibili dynamics --days N` lists the account's own dynamics timeline
+  (type, publish time, forward/comment/like, forward source, lottery flag, and
+  `lottery_sources` showing whether the signal came from current text/additional metadata
+  or the forwarded original). The space feed is WBI-signed; signed query values are
+  redacted from user-facing errors. Pass `--host-mid` to inspect another creator's public
+  dynamics without switching the account namespace.
 - **Per-video detail is its own command on each platform.** `bilibili video-detail --bvid`
   reads the 稿件分析 APIs: a per-second retention curve, average watch duration,
   average completion vs same-tier peers, and the follower-vs-guest play split (plus

@@ -40,6 +40,10 @@ on a real account before tagging.
 
 `SCHEMA_VERSION` in `collector/schema.py` is the consumer contract.
 
+- `2.0`: Douyin `fan_trend` renamed overview `fans.option_list` output from
+  `follower_plays` to `fan_total_on_date`, because the series is the account follower
+  total for that date, not follower plays.
+
 - **Additive** change (new optional metric key, new field) → same version. Consumers using
   `.get()` are unaffected.
 - **Breaking** change (rename/remove a field, change a meaning) → bump `SCHEMA_VERSION` and
