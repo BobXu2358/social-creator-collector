@@ -1456,6 +1456,8 @@ def _fan_growth_canonical(r: dict[str, Any], account: str, captured_at: str) -> 
         platform="douyin", account=account, content_id=None,
         title=r["title"], published_at=r["published"] or None, captured_at=captured_at,
         metrics={"fans": r["fan_growth"]})
+    if r.get("fan_growth_raw") is not None:
+        row["fan_growth_raw"] = r["fan_growth_raw"]
     join_key = _fan_growth_join_key(row.get("title"), row.get("published_at"))
     if join_key:
         row["join_key"] = join_key
@@ -1490,16 +1492,21 @@ async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str
         # 发布时间 filter. Scroll until the rendered cell count stops growing, then
         # extract the whole table once. (Older history needs widening that date
         # filter, which this command does not drive — see the README note.)
-        prev, scrolls = -1, 0
+        prev, stable, scrolls = -1, 0, 0
         for _ in range(max_scroll):
             count = await page.evaluate("() => document.querySelectorAll('td,th').length")
             if count == prev:
-                break
+                stable += 1
+                if stable >= 2:
+                    break
+            else:
+                stable = 0
             prev = count
             await page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
             await page.mouse.wheel(0, 3000)
             await page.wait_for_timeout(1500)
             scrolls += 1
+        await page.wait_for_timeout(800)
         table = await page.evaluate(_EXTRACT_TABLE_JS)
 
     parsed = _parse_fan_table(table)
@@ -1542,11 +1549,14 @@ async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str
 def _parse_int(s: Any) -> int | None:
     if s in (None, ""):
         return None
-    m = re.search(r"-?[\d,]+", str(s))
+    m = re.search(r"([+-]?\d[\d,]*(?:\.\d+)?)\s*(万)?", str(s))
     if not m:
         return None
     try:
-        return int(m.group(0).replace(",", ""))
+        value = float(m.group(1).replace(",", ""))
+        if m.group(2):
+            value *= 10000
+        return int(round(value))
     except ValueError:
         return None
 

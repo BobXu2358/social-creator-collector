@@ -323,6 +323,14 @@ class PureParsers(unittest.TestCase):
         # no 粉丝增量 header anywhere → empty (the caller fails loud, not the parser)
         self.assertEqual(douyin._parse_fan_table([["播放量", "评论"], ["1", "2"]]), [])
 
+    def test_parse_fan_table_parses_wan_unit_growth(self):
+        rows = douyin._parse_fan_table([
+            ["作品", "粉丝增量"],
+            ["视频一\n2026-05-20 12:00", "+1.67万"],
+        ])
+        self.assertEqual(rows[0]["fan_growth_raw"], "+1.67万")
+        self.assertEqual(rows[0]["fan_growth"], 16700)
+
     def test_fan_growth_canonical_adds_fallback_join_key(self):
         captured = "2026-06-02T12:00:00+08:00"
         parsed = {"title": "视频一", "published": "2026-05-20 12:00", "fan_growth": 76}
