@@ -145,6 +145,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ws=_ws(a), account=a.account, credential_path=_bili_credential(a),
         bvid=a.bvid, with_peers=not a.no_peers))
 
+    b_dyn = bili.add_parser("dynamics", parents=[common],
+                            help="account dynamics timeline (动态: 视频/图文/转发/抽奖; WBI-signed)")
+    b_dyn.add_argument("--credential", default="")
+    b_dyn.add_argument("--days", type=_bounded_int(1, 3650), default=30)
+    b_dyn.add_argument("--max-pages", type=_bounded_int(1, 100), default=10, dest="max_pages")
+    b_dyn.add_argument("--host-mid", default="", dest="host_mid",
+                       help="target creator mid (default: the logged-in account)")
+    b_dyn.set_defaults(func=lambda a: bilibili.dynamics(
+        ws=_ws(a), account=a.account, credential_path=_bili_credential(a),
+        days=a.days, max_pages=a.max_pages, host_mid=a.host_mid or None))
+
     b_src = bili.add_parser("fan-source", parents=[common], help="fan source distribution")
     b_src.add_argument("--credential", default="")
     b_src.set_defaults(func=lambda a: bilibili.fan_source(
