@@ -1319,6 +1319,8 @@ def _render_dy_detail_md(row: dict[str, Any]) -> str:
 # ── per-video fan growth (粉丝增量) — DOM only ─────────────────────────────
 
 _FAN_COL = "粉丝增量"
+_FAN_TOP_TAB = "投稿作品"
+_FAN_LIST_TAB = "投稿列表"
 
 # JS lives as a module constant so the row-grouping logic is reviewable, not
 # buried in an f-string. It returns rows as cell-text arrays, grouped by the
@@ -1335,6 +1337,87 @@ _EXTRACT_TABLE_JS = """() => {
     if (cur.length) rows.push(cur);
     return rows;
 }"""
+
+
+async def _wait_for_body_marker(page, markers: tuple[str, ...], *, timeout_ms: int) -> bool:
+    try:
+        await page.wait_for_function(
+            """markers => {
+                const text = (document.body && document.body.innerText) || '';
+                return markers.some(marker => text.includes(marker));
+            }""",
+            list(markers),
+            timeout=timeout_ms,
+        )
+        return True
+    except Exception:
+        return False
+
+
+async def _click_visible_text_with_mouse(
+    page,
+    text: str,
+    *,
+    min_x: int = 0,
+    max_x: int = 2000,
+    timeout_ms: int = 8000,
+) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    while True:
+        box = await page.evaluate(
+            """([needle, minX, maxX]) => {
+                const candidates = [];
+                for (const el of document.querySelectorAll('*')) {
+                    const value = ((el.innerText || el.textContent || '') + '').trim();
+                    if (!value.includes(needle)) continue;
+                    const rect = el.getBoundingClientRect();
+                    const style = getComputedStyle(el);
+                    if (!(rect.width > 0 && rect.height > 0)) continue;
+                    if (style.display === 'none' || style.visibility === 'hidden') continue;
+                    if (rect.x < minX || rect.x > maxX) continue;
+                    candidates.push({
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                    });
+                }
+                candidates.sort((a, b) => (a.width * a.height) - (b.width * b.height));
+                return candidates[0] || null;
+            }""",
+            [text, min_x, max_x],
+        )
+        if box:
+            await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            return True
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await page.wait_for_timeout(500)
+
+
+async def _open_fan_growth_table(page) -> None:
+    # Some accounts land in the live-session panel under data-center/content; the
+    # 投稿列表 radio is only rendered after the top-level 投稿作品 tab is activated.
+    for attempt in range(2):
+        deadline = asyncio.get_running_loop().time() + 75
+        while asyncio.get_running_loop().time() < deadline:
+            body = await _body_text(page, timeout_ms=2000, limit=10000)
+            if _FAN_COL in body:
+                return
+            if _FAN_LIST_TAB in body:
+                if await _click_visible_text_with_mouse(page, _FAN_LIST_TAB, min_x=180, timeout_ms=1000):
+                    if await _wait_for_body_marker(page, (_FAN_COL,), timeout_ms=15000):
+                        return
+            elif _FAN_TOP_TAB in body:
+                await _click_visible_text_with_mouse(page, _FAN_TOP_TAB, min_x=180, timeout_ms=1000)
+                await _wait_for_body_marker(page, (_FAN_LIST_TAB, _FAN_COL), timeout_ms=8000)
+            else:
+                await _wait_for_body_marker(page, (_FAN_TOP_TAB, _FAN_LIST_TAB, _FAN_COL), timeout_ms=3000)
+            await page.wait_for_timeout(1000)
+
+        if attempt == 0:
+            await page.reload(wait_until="domcontentloaded", timeout=60000)
+    raise CollectorError("could not open Douyin 投稿列表 with 粉丝增量")
 
 
 def _parse_fan_table(table: list) -> list:
@@ -1394,7 +1477,7 @@ async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str
         await page.goto("https://creator.douyin.com/creator-micro/data-center/content",
                         wait_until="domcontentloaded", timeout=60000)
         try:
-            await page.locator("text=投稿列表").first.click(timeout=8000)
+            await _open_fan_growth_table(page)
         except Exception as exc:
             raise CollectorError(
                 "could not find the 投稿列表 tab — either not logged in, or Douyin changed "
