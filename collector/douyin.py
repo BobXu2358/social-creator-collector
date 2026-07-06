@@ -1549,11 +1549,14 @@ async def _fan_growth(ws, account, state_path, chromium, max_scroll) -> dict[str
 def _parse_int(s: Any) -> int | None:
     if s in (None, ""):
         return None
-    m = re.search(r"-?[\d,]+", str(s))
+    m = re.search(r"([+-]?\d[\d,]*(?:\.\d+)?)\s*(万)?", str(s))
     if not m:
         return None
     try:
-        return int(m.group(0).replace(",", ""))
+        value = float(m.group(1).replace(",", ""))
+        if m.group(2):
+            value *= 10000
+        return int(round(value))
     except ValueError:
         return None
 
