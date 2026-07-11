@@ -396,9 +396,11 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
         trend_rows = [(x, dt) for x, dt in trend_rows if dt is not None]
         if not trend_rows:
             raise CollectorError("no Bilibili fan trend returned (cookie may lack creator access)")
+        captured = datetime.now(TZ).isoformat()
         latest = max(dt.date() for _, dt in trend_rows)
         start = latest - _days(days - 1)
-        captured = datetime.now(TZ).isoformat()
+        video_latest = datetime.now(TZ).date()
+        video_start = video_latest - _days(days - 1)
         fan_rows = sorted(
             (
                 schema.fan_trend_row(
@@ -428,7 +430,7 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
                 pub = _date_from_epoch(pubtime)
                 if pub is None:
                     continue
-                if start <= pub.date() <= latest:
+                if video_start <= pub.date() <= video_latest:
                     stat = it.get("real_stat") or it.get("stat") or {}
                     compare_stat = (compare_by_bvid.get(str(it.get("bvid"))) or {}).get("stat") or {}
                     row = schema.video_row(
@@ -450,7 +452,7 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
                     videos.append(row)
             last_pubtime = items[-1].get("pubtime")
             last_pub = _date_from_epoch(last_pubtime)
-            if last_pub and last_pub.date() < start:
+            if last_pub and last_pub.date() < video_start:
                 break
     videos.sort(key=lambda r: r["published_at"] or "", reverse=True)
 
@@ -459,7 +461,8 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
         "account": account,
         "platform": "bilibili",
         "source": "Bilibili creator-center APIs",
-        "range": {"start": start.isoformat(), "end": latest.isoformat(), "days": days},
+        "range": {"start": video_start.isoformat(), "end": video_latest.isoformat(), "days": days},
+        "fan_trend_range": {"start": start.isoformat(), "end": latest.isoformat(), "days": days},
         "captured_at": captured,
         "field_notes": {
             "duration_s": "Video duration in seconds, from creator archive data or public view metadata.",
