@@ -10,7 +10,9 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 
@@ -178,6 +180,75 @@ class PureParsers(unittest.TestCase):
         self.assertEqual(result["other_domain_cookie_count"], 1)
         self.assertEqual(result["important_names_present"], ["sessionid"])
         self.assertNotIn("domains", result)
+
+    def test_uses_separate_compatible_fan_and_video_ranges(self):
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        class _FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 13, 12, tzinfo=tz)
+
+        def _epoch(day: int) -> int:
+            return int(datetime(2026, 7, day, 12, tzinfo=bilibili.TZ).timestamp())
+
+        def _get_json(_client, url, params=None, **_kwargs):
+            if url.endswith("/x/web-interface/nav"):
+                return {"data": {"isLogin": True, "mid": 123}}
+            if url.endswith("/overview/stat/graph"):
+                return {"data": {"tendency": [
+                    {"date_key": _epoch(10), "total_inc": 1},
+                    {"date_key": _epoch(11), "total_inc": 2},
+                    {"date_key": _epoch(12), "total_inc": 3},
+                ]}}
+            if url.endswith("/archive/index"):
+                return {"data": {"list": [
+                    {"bvid": "BV13", "title": "today", "pubtime": _epoch(13), "stat": {}},
+                    {"bvid": "BV11", "title": "in range", "pubtime": _epoch(11), "stat": {}},
+                    {"bvid": "BV10", "title": "before video range", "pubtime": _epoch(10), "stat": {}},
+                ]}}
+            self.fail(f"unexpected URL: {url}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            credential_path = ws / "credentials.json"
+            credential_path.write_text(json.dumps({
+                "SESSDATA": "sess",
+                "bili_jct": "csrf",
+            }), encoding="utf-8")
+            with (
+                patch.object(bilibili, "datetime", _FixedDateTime),
+                patch.object(bilibili, "_client", return_value=_Client()),
+                patch.object(bilibili, "_get_json", side_effect=_get_json),
+                patch.object(bilibili, "_account_fan_total", return_value=100),
+                patch.object(bilibili, "_archive_compare_by_bvid", return_value={}),
+                patch.object(bilibili, "_bilibili_video_row_extra", return_value={}),
+            ):
+                output = bilibili.summary(
+                    ws=ws, account="xgame", credential_path=credential_path, days=3,
+                )
+
+            payload = json.loads(Path(output["json"]).read_text(encoding="utf-8"))
+            markdown = Path(output["markdown"]).read_text(encoding="utf-8")
+
+        self.assertEqual(payload["range"], {
+            "start": "2026-07-10", "end": "2026-07-12", "days": 3,
+        })
+        self.assertEqual(payload["video_range"], {
+            "start": "2026-07-11", "end": "2026-07-13", "days": 3,
+        })
+        self.assertNotIn("fan_trend_range", payload)
+        self.assertEqual([row["date"] for row in payload["fan_trend"]], [
+            "2026-07-10", "2026-07-11", "2026-07-12",
+        ])
+        self.assertEqual([row["content_id"] for row in payload["videos"]], ["BV13", "BV11"])
+        self.assertIn("Fan trend range: 2026-07-10 → 2026-07-12", markdown)
+        self.assertIn("Video range: 2026-07-11 → 2026-07-13", markdown)
 
     def test_import_cookie_verification_requires_positive_signal(self):
         login_body = "请扫码登录后继续"
