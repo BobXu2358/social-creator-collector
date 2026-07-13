@@ -9,6 +9,10 @@ Collect comments and danmaku for *published* videos, then turn them into a struc
 feedback report. Collection is bundled in the collector CLI; analysis is an LLM task you do
 on the raw JSON.
 
+Follow the safety and credential rules in [`AGENTS.md`](../../AGENTS.md). Complete command
+options and output contracts are in
+[`docs/CLI_REFERENCE.md`](../../docs/CLI_REFERENCE.md).
+
 ## Collection
 
 ```bash
@@ -32,9 +36,9 @@ Raw JSON lands in `social/<account>/<platform>/raw/`; the danmaku command also w
   `x/v2/reply/wbi/main` which silently returns only ~3 hot comments. The opaque
   `cursor.pagination_reply.next_offset` is the real cursor — `pn=N` looks like it paginates
   but returns page 1 every time. Comments are deduped by `rpid`.
-- **B站 danmaku** comes from the deflate-compressed XML endpoint (`x/v1/dm/list.so`),
-  decompressed with `zlib.decompress(raw, -MAX_WBITS)`. `cid` ≠ `aid`; multi-part videos
-  have one cid per part (the command handles both). pool=1 is subtitle danmaku, filtered by default.
+- **B站 danmaku** resolves each part's `cid`, then fetches protobuf segments from
+  `x/v2/dm/web/seg.so` and decodes them locally. `cid` is not `aid`; multipart videos
+  have one `cid` per part. Pool `1` subtitle danmaku is filtered by default.
 - **抖音 comments** have no clean REST endpoint — the collector loads the video page with the
   imported storage state and captures `aweme/v1/web/comment/list` responses, scrolling to
   lazy-load more. Douyin's DOM class names rotate, so it scrolls the tallest scrollable element

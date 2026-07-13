@@ -10,43 +10,16 @@ The collector is a single CLI: `python -m collector <group> <action> --account <
 
 ## Safety
 
-- Read-only only: no posting, editing, deleting, commenting, following, or account settings.
-- Prefer local-file cookie onboarding; never ask the user to paste cookies into chat (chat-paste is a fallback only).
-- Never print cookie values, tokens, or storage state.
-- One namespace per account. Never index `_secrets/` into memory.
-
-## Setup
-
-```bash
-python3 -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
-python -m playwright install chromium    # Douyin only
-```
-
-The Douyin commands launch Playwright's bundled Chromium by default — no path to
-configure. Override with `--chromium <path>` / `$SCC_CHROMIUM` if needed.
-
-## Onboarding
-
-Preferred — QR scan login. A headed browser opens; the human scans the platform's own
-QR with their phone; the session is saved automatically.
-
-```bash
-python -m collector init            --account <account>
-python -m collector bilibili login  --account <account>   # → credential file
-python -m collector douyin   login  --account <account>   # → storage state
-```
-
-`login` needs a desktop session (headed browser). When cookies expire, re-run it.
-
-Fallback (QR rejected, or headless host) — Cookie-Editor export → JSON:
-- B站: `social/_secrets/<account>/bilibili/default.credentials.json` — `{"SESSDATA":"...","bili_jct":"...","buvid3":"..."}`
-- 抖音: `social/_secrets/<account>/douyin/default.cookies.json` (then `douyin import-cookies`)
+- Follow the repository-wide safety, credential, and discovery rules in
+  [`AGENTS.md`](../../AGENTS.md).
+- Never read, index, print, or return raw values from `_secrets/`.
+- Use [`docs/CLI_REFERENCE.md`](../../docs/CLI_REFERENCE.md) for complete options,
+  defaults, authentication requirements, and output contracts.
 
 ## Collecting
 
 ```bash
-# B站 — pure HTTP, no browser
+# B站 collection is HTTP-based; QR login itself uses a headed browser
 python -m collector bilibili probe   --account <account>
 python -m collector bilibili summary --account <account> --days 30
 
@@ -57,6 +30,11 @@ python -m collector douyin fan-growth --account <account>   # 粉丝增量, DOM-
 
 `bilibili summary` returns daily fan increments plus per-video play/fans/**coin**/reply/likes
 — that's the涨粉 + 投币 data a monthly performance workflow needs.
+
+Its date fields are intentionally different: `range` is the fan-trend API window ending
+on the latest date that API returned, while `video_range` is the video publish window
+ending on the collection date in `Asia/Shanghai`. `fan_inc_total` sums the daily rows in
+`range`.
 
 ## Douyin per-video fan growth (粉丝增量)
 
