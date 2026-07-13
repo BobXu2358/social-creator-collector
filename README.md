@@ -9,6 +9,12 @@
 
 两个平台的数据路径不同是有原因的：B站三个 cookie 拼成请求头就够日常采集，但 `bilibili login` 仍是二维码浏览器流程；抖音的登录态和 `a-bogus` 签名只能在真浏览器里生成，所以必须起 Playwright。
 
+## 不懂命令？直接发给 Agent
+
+把下面这段话复制给你的 coding agent：
+
+> 打开 https://github.com/BobXu2358/social-creator-collector，先阅读 `AGENTS.md`，帮我在本机配置这个只读采集器。先问我要采 B站、抖音还是两个平台，并让我取一个 account 名称；优先引导我扫码登录，不要让我把 cookie 发到聊天里；最后验证登录状态并告诉我是否配置成功。
+
 ## 快速上手
 
 ```bash
