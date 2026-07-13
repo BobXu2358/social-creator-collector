@@ -396,10 +396,11 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
         trend_rows = [(x, dt) for x, dt in trend_rows if dt is not None]
         if not trend_rows:
             raise CollectorError("no Bilibili fan trend returned (cookie may lack creator access)")
-        captured = datetime.now(TZ).isoformat()
+        captured_dt = datetime.now(TZ)
+        captured = captured_dt.isoformat()
         latest = max(dt.date() for _, dt in trend_rows)
         start = latest - _days(days - 1)
-        video_latest = datetime.now(TZ).date()
+        video_latest = captured_dt.date()
         video_start = video_latest - _days(days - 1)
         fan_rows = sorted(
             (
@@ -461,8 +462,8 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
         "account": account,
         "platform": "bilibili",
         "source": "Bilibili creator-center APIs",
-        "range": {"start": video_start.isoformat(), "end": video_latest.isoformat(), "days": days},
-        "fan_trend_range": {"start": start.isoformat(), "end": latest.isoformat(), "days": days},
+        "range": {"start": start.isoformat(), "end": latest.isoformat(), "days": days},
+        "video_range": {"start": video_start.isoformat(), "end": video_latest.isoformat(), "days": days},
         "captured_at": captured,
         "field_notes": {
             "duration_s": "Video duration in seconds, from creator archive data or public view metadata.",
@@ -490,7 +491,8 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
     lines = [
         f"# {account} Bilibili creator data ({days} days)",
         "",
-        f"Range: {start.isoformat()} → {latest.isoformat()}",
+        f"Fan trend range: {start.isoformat()} → {latest.isoformat()}",
+        f"Video range: {video_start.isoformat()} → {video_latest.isoformat()}",
         f"Current fans (账号当前粉丝总数): {account_fan_total:,}" if account_fan_total is not None
         else "Current fans (账号当前粉丝总数): unavailable",
         f"Net new fans in range: {result['fan_inc_total']:,}",
