@@ -3,6 +3,17 @@
 A read-only toolkit for Bilibili & Douyin creator data. One CLI, two platforms.
 You set it up and run it safely — never paste secrets into chat, never print cookie values.
 
+## Related documentation
+
+| Document | Purpose |
+|---|---|
+| [README.md](README.md) | Human-facing overview and quick start |
+| [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) | Detailed commands, options, outputs, and platform semantics |
+| [schemas/collector-output.schema.json](schemas/collector-output.schema.json) | Machine-readable canonical row contract |
+| [MAINTAINING.md](MAINTAINING.md) | Core boundaries, schema versioning, releases, and PR checks |
+| [skills/social-creator-data/SKILL.md](skills/social-creator-data/SKILL.md) | Creator-metrics collection workflow |
+| [skills/feedback-analytics/SKILL.md](skills/feedback-analytics/SKILL.md) | Comment and danmaku analysis workflow |
+
 ## Safety rules (read first)
 
 - **Read-only only**: no posting, editing, deleting, commenting, DM, following, account settings, or login changes.
@@ -51,7 +62,7 @@ decides whether the data should become a supported core command.
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e .                         # or: pip install -r requirements.txt
-python -m playwright install chromium    # only needed for the Douyin commands
+python -m playwright install chromium    # needed for QR login and all Douyin collection
 ```
 
 `pip install -e .` also puts a `collector` command on PATH (identical to
@@ -72,14 +83,15 @@ driving this on a colleague's Windows machine:
   py -3 -m venv .venv
   .\.venv\Scripts\Activate.ps1
   pip install -e .
-  python -m playwright install chromium   # only for the Douyin commands
+  python -m playwright install chromium   # needed for QR login and all Douyin collection
   ```
 - **`tzdata` is pulled in automatically** on Windows (the package depends on it). Without a tz
   database, `ZoneInfo("Asia/Shanghai")` makes every command fail at import — so don't strip it.
 
-Bilibili is pure HTTP, so a **B站-only** setup needs just Python + `pip install` — no
-`playwright install chromium`, no browser. Chromium (and a desktop session for the headed QR
-login) is only required for the Douyin commands.
+Bilibili data collection is HTTP-based, but `bilibili login` is a headed
+Playwright QR flow. A Bilibili-only setup may skip Chromium only when a valid
+credentials file is supplied manually. Both platform `login` commands need a
+desktop session.
 
 ## Staying current
 
@@ -135,12 +147,15 @@ https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfdd
 python -m collector <group> <action> --account <account> [options]
 ```
 
+The table below orients you by command; exact options, defaults, and constraints
+are in `docs/CLI_REFERENCE.md`.
+
 | Command | What it does |
 |---|---|
 | `init --account X` | create folder structure + example credential files |
 | `bilibili login --account X` | QR scan login (headed browser) → credential file |
 | `bilibili probe --account X` | verify B站 login + identity (fails loud if cookie expired) |
-| `bilibili summary --account X --days 30` | account_fan_total (当前粉丝总数) + fan trend + per-video play/fans/coin/reply/likes |
+| `bilibili summary --account X --days 30` | account_fan_total (当前粉丝总数) + fan_inc_total + API-anchored fan `range` + collection-date-anchored `video_range` + per-video play/fans/coin/reply/likes |
 | `bilibili video-detail --account X --bvid BVxxx` | single-video retention curve + completion + follower/guest split + audience + 封标点击率 relative signals + 3秒跳出率 |
 | `bilibili fan-source --account X` | fan source distribution (video/search/space/etc.) |
 | `bilibili dynamics --account X --days 30` | 动态 timeline: 视频/图文/转发/互动抽奖 + forward source + lottery detection sources (WBI-signed space feed) |
@@ -149,15 +164,16 @@ python -m collector <group> <action> --account <account> [options]
 | `douyin login --account X` | QR scan login (headed browser) → storage state |
 | `douyin check-cookies --account X` | validate a Cookie-Editor export's structure |
 | `douyin import-cookies --account X` | cookies → Playwright storage state + verify login |
-| `douyin worklist --account X --days 30` | creator-center work list + basic metrics + account_fan_total (当前粉丝总数) |
+| `douyin worklist --account X --days 30` | creator-center work list + basic metrics + account_fan_total (当前粉丝总数); `--days 0` means all available works |
 | `douyin item-analysis --account X --days 30` | per-work avg watch time + 5s完播率 + 2s跳出率 (作品分析批量) |
 | `douyin video-detail --account X --aweme-id ID` | single-video 完播率 + 流量来源 + 进度曲线 + 搜索词 + 观众画像 (分析详情) |
-| `douyin fan-trend --account X --days 30` | daily net fans + related overview metrics + account_fan_total (当前粉丝总数) |
+| `douyin fan-trend --account X --days 30` | daily net fans + related overview metrics + account_fan_total (当前粉丝总数); `--days` choices `7/15/30`; includes `fan_inc_total` |
 | `douyin fan-growth --account X` | **per-video 粉丝增量** from 投稿列表 DOM |
 | `douyin comments --account X --aweme-id ID` | collect video comments |
 
-Every command prints one JSON result line. Outputs land under
-`social/<account>/<platform>/raw/*.json` and `processed/*.md`. On an unexpected error
+Every command prints one indented JSON result object. Outputs land under
+`social/<account>/<platform>/raw/*.json` and, where supported, `processed/*.md`.
+On an unexpected error
 the CLI prints a one-line `ERROR: …` and exits non-zero; pass `--debug` to any command
 for the full traceback.
 
@@ -166,11 +182,16 @@ for the full traceback.
 Per-video and daily-fan-trend data use a canonical, versioned row shape
 (`collector/schema.py`, documented in `schemas/collector-output.schema.json`), so a
 consumer sees the same field names across platforms — `metrics.plays/likes/comments/
-shares/collects/coins/fans`, plus `content_id`, `published_at`, `captured_at`. Every
-data output carries `schema_version`; it bumps only on breaking changes. Build
-downstream tools against this shape, not against one command's incidental JSON.
+shares/collects/coins/fans`, plus `content_id`, `published_at`, `captured_at`. Canonical
+video and fan-trend rows carry `schema_version`; it bumps only on breaking changes.
+Comments, danmaku, dynamics, and fan-source command-specific rows are outside the
+JSON Schema. Build downstream tools against the canonical shape, not against one
+command's incidental JSON.
 
 ## What's worth knowing (so you don't relearn the traps)
+
+The following platform semantics affect how you interpret results; detailed option
+lists, stdout keys, and raw-file envelope shapes are in `docs/CLI_REFERENCE.md`.
 
 - **Douyin per-video fan growth has no API** — it only exists in the 投稿列表 table DOM.
   `douyin fan-growth` locates the 粉丝增量 column by header text and fails loud if Douyin

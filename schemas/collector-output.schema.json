@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Collector canonical rows",
-  "description": "The cross-platform output contract. schema_version is bumped on breaking changes; see MAINTAINING.md. Built by collector/schema.py.",
+  "description": "The cross-platform canonical-row contract for $defs.video_row and $defs.fan_trend_row, not a schema for every command envelope. schema_version is bumped on breaking changes; see MAINTAINING.md. Built by collector/schema.py.",
   "$defs": {
     "video_row": {
       "type": "object",
@@ -71,7 +71,7 @@
         },
         "detail": {
           "type": "object",
-          "description": "Per-video deep analytics from a detail command (bilibili video-detail / douyin item-analysis): e.g. retention_curve [{second, retained_pct}], completion, audience_play_split, terminal_distribution, demographics, fan_conversion, or per-client splits. Present only on detail rows; shapes vary by platform.",
+          "description": "Per-video analytics added by bilibili video-detail, douyin item-analysis, or douyin video-detail: e.g. retention curves, completion, audience splits, traffic sources, demographics, fan conversion, or per-client splits. Shapes vary by platform and command.",
           "additionalProperties": true
         },
         "published_at": {
@@ -82,7 +82,7 @@
         "source_url": { "type": ["string", "null"] },
         "metrics": {
           "type": "object",
-          "description": "Only keys that apply are present (absent = N/A). Standard keys below; platforms may add extras. Detail commands add per-video keys: avg_watch_duration_s (seconds); avg_completion_pct / completion_rate_5s_pct / bounce_rate_2s_pct / bounce_rate_3s_pct / follower_play_ratio_pct / guest_play_ratio_pct (all percent, already normalized — bilibili from basis points, douyin from 0..1 fractions). bounce_rate_3s_pct is Bilibili's 3秒跳出率 (first-14-days window). Bilibili exposes no impressions/clicks and randomizes absolute 封标点击率, so CTR appears only as relative signals under detail.click_through, never as an absolute metric key.",
+          "description": "Only keys that apply are present (absent = N/A). Standard keys appear below; platforms may add extras. avg_watch_duration_s is seconds. Fields ending in _pct, including avg_completion_pct, completion_rate_pct, completion_rate_5s_pct, bounce_rate_2s_pct, bounce_rate_3s_pct, follower_play_ratio_pct, guest_play_ratio_pct, and cover_click_rate_pct, are normalized percentages. Bilibili summary's extra full_play_ratio is a raw basis-point value, not an already-normalized percent. bounce_rate_3s_pct is Bilibili's 3秒跳出率 for the first 14 days. Bilibili exposes no impressions/clicks and randomizes absolute 封标点击率, so CTR appears only as relative signals under detail.click_through, never as an absolute metric key.",
           "properties": {
             "plays": { "type": "integer" },
             "likes": { "type": "integer" },
