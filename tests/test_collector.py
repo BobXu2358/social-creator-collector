@@ -953,6 +953,82 @@ class PerVideoDetailHelpers(unittest.TestCase):
             douyin._detail_metrics_diagnostics(
                 aweme_id="7648986531704638726", compare={"item": {}}, row=row)
 
+    def test_douyin_detail_metrics_diagnostics_rejects_secondary_data_without_identity(self):
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare={"item": {}},
+            source={"play_source": [{"key": "search", "value": 0.25}]},
+            progress={}, search={}, portrait={})
+
+        with self.assertRaisesRegex(douyin.CollectorError, "no identifiable item"):
+            douyin._detail_metrics_diagnostics(
+                aweme_id="7648986531704638726", compare={"item": {}}, row=row)
+
+    def test_douyin_detail_metrics_diagnostics_rejects_mismatched_identity(self):
+        compare = {
+            "item": {"aweme_id": "7600000000000000000", "description": "other", "metrics": {}},
+        }
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
+            source={"play_source": [{"key": "search", "value": 0.25}]},
+            progress={}, search={}, portrait={})
+
+        with self.assertRaisesRegex(douyin.CollectorError, "different work"):
+            douyin._detail_metrics_diagnostics(
+                aweme_id="7648986531704638726", compare=compare, row=row)
+
+    def test_douyin_detail_metrics_diagnostics_accepts_matching_compare_request_identity(self):
+        compare = {"item": {}}
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
+            source={"play_source": [{"key": "search", "value": 0.25}]},
+            progress={}, search={}, portrait={})
+
+        diagnostics = douyin._detail_metrics_diagnostics(
+            aweme_id="7648986531704638726", compare=compare, row=row,
+            response_aweme_id="7648986531704638726")
+
+        self.assertEqual(diagnostics["identity_source"], "item_compare_request")
+        self.assertIn("traffic_source", diagnostics["available_data"])
+
+    def test_douyin_detail_metrics_diagnostics_rejects_mismatched_compare_request_identity(self):
+        compare = {"item": {}}
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
+            source={"play_source": [{"key": "search", "value": 0.25}]},
+            progress={}, search={}, portrait={})
+
+        with self.assertRaisesRegex(douyin.CollectorError, "different work"):
+            douyin._detail_metrics_diagnostics(
+                aweme_id="7648986531704638726", compare=compare, row=row,
+                response_aweme_id="7600000000000000000")
+
+    def test_douyin_detail_response_aweme_id_reads_item_id(self):
+        self.assertEqual(
+            douyin._detail_response_aweme_id(
+                "https://creator.douyin.com/data/diagnose/item_compare?item_id=7648986531704638726"),
+            "7648986531704638726")
+
+    def test_douyin_detail_partial_status_marks_raw_and_stdout_results(self):
+        diagnostics = {
+            "reason": "item_compare_metrics_unavailable",
+            "identity_source": "item_compare_request",
+            "available_data": ["identity", "traffic_source"],
+        }
+        raw_result = douyin._apply_detail_partial_status({}, diagnostics, include_diagnostics=True)
+        stdout_result = douyin._apply_detail_partial_status({}, diagnostics, include_diagnostics=False)
+
+        self.assertTrue(raw_result["partial"])
+        self.assertIn("preserved", raw_result["warning"])
+        self.assertEqual(raw_result["diagnostics"], diagnostics)
+        self.assertTrue(stdout_result["partial"])
+        self.assertNotIn("diagnostics", stdout_result)
+
+    def test_douyin_detail_partial_status_leaves_complete_result_unchanged(self):
+        result = {"ok": True}
+        self.assertEqual(
+            douyin._apply_detail_partial_status(result, None, include_diagnostics=True),
+            {"ok": True})
+
     def test_overview_block_adds_value_pct_for_rates(self):
         block = douyin._overview_block({
             "completion_rate_5s": {"metric_name": "条均5s完播率", "metric_value": 0.5112},

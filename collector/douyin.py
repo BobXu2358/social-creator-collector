@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from . import schema
 from .browser import BUNDLED_HINT, launch_kwargs
@@ -1183,19 +1184,52 @@ def _dy_detail_row(*, account: str, captured: str, aweme_id: str, compare: dict[
     return row
 
 
+def _detail_response_aweme_id(url: str) -> str:
+    """Read only the non-secret work id from an intercepted item_compare URL."""
+    try:
+        query = parse_qs(urlparse(url).query)
+    except (TypeError, ValueError):
+        return ""
+    for key in ("item_id", "aweme_id"):
+        values = query.get(key) or []
+        if values and values[0] not in (None, ""):
+            return str(values[0])
+    return ""
+
+
 def _detail_metrics_diagnostics(*, aweme_id: str, compare: dict[str, Any],
-                                row: dict[str, Any]) -> dict[str, Any] | None:
+                                row: dict[str, Any], response_aweme_id: str = "") -> dict[str, Any] | None:
     """Allow useful partial detail while still rejecting an empty/foreign response."""
     item = (compare or {}).get("item") or {}
     item_metrics = item.get("metrics") or {}
+    requested_id = str(aweme_id)
+    item_response_ids = [
+        str(item[key]) for key in ("id", "item_id", "aweme_id")
+        if item.get(key) not in (None, "")
+    ]
+    response_ids = [*item_response_ids]
+    if response_aweme_id:
+        response_ids.append(str(response_aweme_id))
+    if any(response_id != requested_id for response_id in response_ids):
+        raise CollectorError(
+            f"Douyin returned detail for a different work than requested aweme_id {aweme_id}.")
     if item_metrics.get("view_count") not in (None, ""):
         return None
 
     detail = row.get("detail") or {}
-    available_data = []
-    if any(item.get(key) not in (None, "")
-           for key in ("id", "item_id", "aweme_id", "description", "create_time")):
-        available_data.append("identity")
+    identity_source = ""
+    if item_response_ids:
+        identity_source = "item"
+    elif response_aweme_id:
+        identity_source = "item_compare_request"
+    elif any(item.get(key) not in (None, "") for key in ("description", "create_time")):
+        identity_source = "item_metadata"
+    if not identity_source:
+        raise CollectorError(
+            f"Douyin returned no metrics and no identifiable item for aweme_id {aweme_id}. "
+            "Pass an aweme_id from `douyin worklist`/`item-analysis`.")
+
+    available_data = ["identity"]
     if row.get("metrics"):
         available_data.append("item_metrics")
     if detail.get("traffic_source"):
@@ -1212,14 +1246,28 @@ def _detail_metrics_diagnostics(*, aweme_id: str, compare: dict[str, Any],
     if detail.get("audience"):
         available_data.append("audience")
 
-    if not available_data:
+    if available_data == ["identity"]:
         raise CollectorError(
             f"Douyin returned no metrics for aweme_id {aweme_id} — wrong id, or the work is not "
             "yours. Pass an aweme_id from `douyin worklist`/`item-analysis`.")
     return {
         "reason": "item_compare_metrics_unavailable",
+        "identity_source": identity_source,
         "available_data": available_data,
     }
+
+
+def _apply_detail_partial_status(result: dict[str, Any], diagnostics: dict[str, Any] | None,
+                                 *, include_diagnostics: bool) -> dict[str, Any]:
+    if not diagnostics:
+        return result
+    result["partial"] = True
+    result["warning"] = (
+        "item_compare returned no play metrics; preserved the other available "
+        "single-video detail data")
+    if include_diagnostics:
+        result["diagnostics"] = diagnostics
+    return result
 
 
 def video_detail(*, ws: Path, account: str, state_path: Path, aweme_id: str,
@@ -1231,6 +1279,7 @@ async def _video_detail(ws, account, state_path, aweme_id, chromium):
     if not state_path.exists():
         raise CollectorError(f"missing Douyin storage state; run login/import-cookies first: {state_path}")
     grabbed: dict[str, Any] = {}
+    grabbed_response_ids: dict[str, str] = {}
     async_playwright = _import_playwright()
     landing_body = ""
     async with async_playwright() as p, _browser(p, chromium) as browser:
@@ -1243,6 +1292,13 @@ async def _video_detail(ws, account, state_path, aweme_id, chromium):
                 if frag in url and name not in grabbed:
                     try:
                         grabbed[name] = await resp.json()
+                        if name == "compare":
+                            # A valid partial response can have an empty ``item``. The observed
+                            # item_compare request still carries ``item_id``; retain only that
+                            # non-secret identity value, never the signed URL or query string.
+                            response_aweme_id = _detail_response_aweme_id(url)
+                            if response_aweme_id:
+                                grabbed_response_ids[name] = response_aweme_id
                     except Exception:
                         pass
 
@@ -1291,7 +1347,8 @@ async def _video_detail(ws, account, state_path, aweme_id, chromium):
                          progress=grabbed.get("progress") or {}, search=grabbed.get("search") or {},
                          portrait=grabbed.get("portrait") or {})
     partial_diagnostics = _detail_metrics_diagnostics(
-        aweme_id=str(aweme_id), compare=grabbed["compare"], row=row)
+        aweme_id=str(aweme_id), compare=grabbed["compare"], row=row,
+        response_aweme_id=grabbed_response_ids.get("compare", ""))
     result = {
         "schema_version": schema.SCHEMA_VERSION,
         "account": account, "platform": "douyin",
@@ -1308,12 +1365,7 @@ async def _video_detail(ws, account, state_path, aweme_id, chromium):
         },
         "video": row,
     }
-    if partial_diagnostics:
-        result["partial"] = True
-        result["warning"] = (
-            "item_compare returned no play metrics; preserved the other available "
-            "single-video detail data")
-        result["diagnostics"] = partial_diagnostics
+    _apply_detail_partial_status(result, partial_diagnostics, include_diagnostics=True)
     raw, processed = output_dirs(ws, account, "douyin")
     stamp = _stamp()
     jp = raw / f"douyin-video-detail-{aweme_id}-{stamp}.json"
@@ -1326,10 +1378,8 @@ async def _video_detail(ws, account, state_path, aweme_id, chromium):
                "completion_rate_pct": m.get("completion_rate_pct"),
                "avg_watch_duration_s": m.get("avg_watch_duration_s"),
                "traffic_sources": len(row.get("detail", {}).get("traffic_source") or [])}
-    if partial_diagnostics:
-        summary["partial"] = True
-        summary["warning"] = result["warning"]
-    return summary
+    return _apply_detail_partial_status(
+        summary, partial_diagnostics, include_diagnostics=False)
 
 
 def _render_dy_detail_md(row: dict[str, Any]) -> str:
