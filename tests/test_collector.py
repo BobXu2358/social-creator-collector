@@ -928,7 +928,11 @@ class PerVideoDetailHelpers(unittest.TestCase):
             progress={}, search={}, portrait={})
 
         diagnostics = douyin._detail_metrics_diagnostics(
-            aweme_id="7648986531704638726", compare=compare, row=row)
+            aweme_id="7648986531704638726", compare=compare, row=row,
+            request_aweme_ids={
+                "compare": "7648986531704638726",
+                "source": "7648986531704638726",
+            })
 
         self.assertEqual(diagnostics["reason"], "item_compare_metrics_unavailable")
         self.assertIn("identity", diagnostics["available_data"])
@@ -959,7 +963,7 @@ class PerVideoDetailHelpers(unittest.TestCase):
             source={"play_source": [{"key": "search", "value": 0.25}]},
             progress={}, search={}, portrait={})
 
-        with self.assertRaisesRegex(douyin.CollectorError, "no identifiable item"):
+        with self.assertRaisesRegex(douyin.CollectorError, "could not bind traffic_source"):
             douyin._detail_metrics_diagnostics(
                 aweme_id="7648986531704638726", compare={"item": {}}, row=row)
 
@@ -976,7 +980,19 @@ class PerVideoDetailHelpers(unittest.TestCase):
             douyin._detail_metrics_diagnostics(
                 aweme_id="7648986531704638726", compare=compare, row=row)
 
-    def test_douyin_detail_metrics_diagnostics_accepts_matching_compare_request_identity(self):
+    def test_douyin_detail_metrics_diagnostics_rejects_compare_request_echo_without_binding(self):
+        compare = {"item": {}}
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
+            source={"play_source": [{"key": "search", "value": 0.25}]},
+            progress={}, search={}, portrait={})
+
+        with self.assertRaisesRegex(douyin.CollectorError, "could not bind traffic_source"):
+            douyin._detail_metrics_diagnostics(
+                aweme_id="7648986531704638726", compare=compare, row=row,
+                request_aweme_ids={"compare": "7648986531704638726"})
+
+    def test_douyin_detail_metrics_diagnostics_accepts_matching_detail_request_identities(self):
         compare = {"item": {}}
         row = douyin._dy_detail_row(
             account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
@@ -985,10 +1001,35 @@ class PerVideoDetailHelpers(unittest.TestCase):
 
         diagnostics = douyin._detail_metrics_diagnostics(
             aweme_id="7648986531704638726", compare=compare, row=row,
-            response_aweme_id="7648986531704638726")
+            request_aweme_ids={
+                "compare": "7648986531704638726",
+                "source": "7648986531704638726",
+            })
 
-        self.assertEqual(diagnostics["identity_source"], "item_compare_request")
+        self.assertEqual(diagnostics["identity_source"], "matched_detail_requests")
         self.assertIn("traffic_source", diagnostics["available_data"])
+
+    def test_douyin_detail_metrics_diagnostics_accepts_live_shaped_request_bindings(self):
+        compare = {"item": {}}
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
+            source={"play_source": [{"key": "search", "value": 0.25}]}, progress={},
+            search={"show_from": [{"keyword": "query", "percent": 1}]},
+            portrait={"gender": {"ratio_list": [{"key": "男", "value": 0.8}]}})
+
+        diagnostics = douyin._detail_metrics_diagnostics(
+            aweme_id="7648986531704638726", compare=compare, row=row,
+            request_aweme_ids={
+                "compare": "7648986531704638726",
+                "source": "7648986531704638726",
+                "search": "7648986531704638726",
+                "portrait": "7648986531704638726",
+            })
+
+        self.assertEqual(diagnostics["identity_source"], "matched_detail_requests")
+        self.assertEqual(
+            diagnostics["available_data"],
+            ["identity", "traffic_source", "search_keywords", "audience"])
 
     def test_douyin_detail_metrics_diagnostics_rejects_mismatched_compare_request_identity(self):
         compare = {"item": {}}
@@ -1000,18 +1041,57 @@ class PerVideoDetailHelpers(unittest.TestCase):
         with self.assertRaisesRegex(douyin.CollectorError, "different work"):
             douyin._detail_metrics_diagnostics(
                 aweme_id="7648986531704638726", compare=compare, row=row,
-                response_aweme_id="7600000000000000000")
+                request_aweme_ids={
+                    "compare": "7600000000000000000",
+                    "source": "7648986531704638726",
+                })
 
-    def test_douyin_detail_response_aweme_id_reads_item_id(self):
+    def test_douyin_detail_metrics_diagnostics_rejects_mismatched_secondary_identity(self):
+        compare = {"item": {}}
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
+            source={"play_source": [{"key": "search", "value": 0.25}]},
+            progress={}, search={}, portrait={})
+
+        with self.assertRaisesRegex(douyin.CollectorError, "different work"):
+            douyin._detail_metrics_diagnostics(
+                aweme_id="7648986531704638726", compare=compare, row=row,
+                request_aweme_ids={
+                    "compare": "7648986531704638726",
+                    "source": "7600000000000000000",
+                })
+
+    def test_douyin_detail_metrics_diagnostics_requires_every_secondary_binding(self):
+        compare = {"item": {}}
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
+            source={"play_source": [{"key": "search", "value": 0.25}]},
+            progress={}, search={"show_from": [{"keyword": "query", "percent": 1}]}, portrait={})
+
+        with self.assertRaisesRegex(douyin.CollectorError, "could not bind search_keywords"):
+            douyin._detail_metrics_diagnostics(
+                aweme_id="7648986531704638726", compare=compare, row=row,
+                request_aweme_ids={
+                    "compare": "7648986531704638726",
+                    "source": "7648986531704638726",
+                })
+
+    def test_douyin_detail_request_aweme_id_reads_item_id(self):
         self.assertEqual(
-            douyin._detail_response_aweme_id(
+            douyin._detail_request_aweme_id(
                 "https://creator.douyin.com/data/diagnose/item_compare?item_id=7648986531704638726"),
+            "7648986531704638726")
+
+    def test_douyin_detail_request_aweme_id_reads_aweme_id(self):
+        self.assertEqual(
+            douyin._detail_request_aweme_id(
+                "https://creator.douyin.com/data/item/play/source?aweme_id=7648986531704638726"),
             "7648986531704638726")
 
     def test_douyin_detail_partial_status_marks_raw_and_stdout_results(self):
         diagnostics = {
             "reason": "item_compare_metrics_unavailable",
-            "identity_source": "item_compare_request",
+            "identity_source": "matched_detail_requests",
             "available_data": ["identity", "traffic_source"],
         }
         raw_result = douyin._apply_detail_partial_status({}, diagnostics, include_diagnostics=True)

@@ -1184,8 +1184,8 @@ def _dy_detail_row(*, account: str, captured: str, aweme_id: str, compare: dict[
     return row
 
 
-def _detail_response_aweme_id(url: str) -> str:
-    """Read only the non-secret work id from an intercepted item_compare URL."""
+def _detail_request_aweme_id(url: str) -> str:
+    """Read only the non-secret work id from an intercepted detail request URL."""
     try:
         query = parse_qs(urlparse(url).query)
     except (TypeError, ValueError):
@@ -1197,59 +1197,87 @@ def _detail_response_aweme_id(url: str) -> str:
     return ""
 
 
-def _detail_metrics_diagnostics(*, aweme_id: str, compare: dict[str, Any],
-                                row: dict[str, Any], response_aweme_id: str = "") -> dict[str, Any] | None:
+def _detail_metrics_diagnostics(
+    *, aweme_id: str, compare: dict[str, Any], row: dict[str, Any],
+    request_aweme_ids: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
     """Allow useful partial detail while still rejecting an empty/foreign response."""
     item = (compare or {}).get("item") or {}
     item_metrics = item.get("metrics") or {}
     requested_id = str(aweme_id)
+    request_ids = {
+        str(name): str(value) for name, value in (request_aweme_ids or {}).items()
+        if value not in (None, "")
+    }
     item_response_ids = [
         str(item[key]) for key in ("id", "item_id", "aweme_id")
         if item.get(key) not in (None, "")
     ]
-    response_ids = [*item_response_ids]
-    if response_aweme_id:
-        response_ids.append(str(response_aweme_id))
-    if any(response_id != requested_id for response_id in response_ids):
+    observed_ids = [*item_response_ids, *request_ids.values()]
+    if any(response_id != requested_id for response_id in observed_ids):
         raise CollectorError(
             f"Douyin returned detail for a different work than requested aweme_id {aweme_id}.")
     if item_metrics.get("view_count") not in (None, ""):
         return None
 
     detail = row.get("detail") or {}
-    identity_source = ""
+    available_data = []
+    compare_data_available = False
+    secondary_bindings = []
+    if row.get("metrics"):
+        available_data.append("item_metrics")
+        compare_data_available = True
+    if detail.get("traffic_source"):
+        available_data.append("traffic_source")
+        secondary_bindings.append(("traffic_source", "source"))
+    progress = detail.get("progress_analysis") or {}
+    if progress.get("drag_back_curve") or progress.get("drag_forward_curve"):
+        available_data.append("progress_analysis")
+        secondary_bindings.append(("progress_analysis", "progress"))
+    if detail.get("search_keywords"):
+        available_data.append("search_keywords")
+        secondary_bindings.append(("search_keywords", "search"))
+    if detail.get("engagement_rates_pct"):
+        available_data.append("engagement_rates_pct")
+        compare_data_available = True
+    if (detail.get("peer_comparison") or {}).get("peer_count"):
+        available_data.append("peer_comparison")
+        compare_data_available = True
+    if detail.get("audience"):
+        available_data.append("audience")
+        secondary_bindings.append(("audience", "portrait"))
+
+    if not available_data:
+        raise CollectorError(
+            f"Douyin returned no metrics for aweme_id {aweme_id} — wrong id, or the work is not "
+            "yours. Pass an aweme_id from `douyin worklist`/`item-analysis`.")
+
+    unbound = [label for label, endpoint in secondary_bindings
+               if request_ids.get(endpoint) != requested_id]
+    if unbound:
+        raise CollectorError(
+            f"Douyin could not bind {', '.join(unbound)} to requested aweme_id {aweme_id}.")
+
     if item_response_ids:
         identity_source = "item"
-    elif response_aweme_id:
-        identity_source = "item_compare_request"
     elif any(item.get(key) not in (None, "") for key in ("description", "create_time")):
         identity_source = "item_metadata"
-    if not identity_source:
+    elif compare_data_available and request_ids.get("compare") == requested_id:
+        # Unlike an empty response, useful data inside item_compare is bound to the
+        # request that returned it. The request id alone is never sufficient.
+        identity_source = "item_compare_request"
+    elif (secondary_bindings and request_ids.get("compare") == requested_id
+          and not unbound):
+        # An empty item_compare can still accompany valid detail endpoints. Require
+        # every preserved endpoint to carry the same work id so a request echo cannot
+        # bless stale/default data from a different work.
+        identity_source = "matched_detail_requests"
+    else:
         raise CollectorError(
             f"Douyin returned no metrics and no identifiable item for aweme_id {aweme_id}. "
             "Pass an aweme_id from `douyin worklist`/`item-analysis`.")
 
-    available_data = ["identity"]
-    if row.get("metrics"):
-        available_data.append("item_metrics")
-    if detail.get("traffic_source"):
-        available_data.append("traffic_source")
-    progress = detail.get("progress_analysis") or {}
-    if progress.get("drag_back_curve") or progress.get("drag_forward_curve"):
-        available_data.append("progress_analysis")
-    if detail.get("search_keywords"):
-        available_data.append("search_keywords")
-    if detail.get("engagement_rates_pct"):
-        available_data.append("engagement_rates_pct")
-    if (detail.get("peer_comparison") or {}).get("peer_count"):
-        available_data.append("peer_comparison")
-    if detail.get("audience"):
-        available_data.append("audience")
-
-    if available_data == ["identity"]:
-        raise CollectorError(
-            f"Douyin returned no metrics for aweme_id {aweme_id} — wrong id, or the work is not "
-            "yours. Pass an aweme_id from `douyin worklist`/`item-analysis`.")
+    available_data.insert(0, "identity")
     return {
         "reason": "item_compare_metrics_unavailable",
         "identity_source": identity_source,
@@ -1279,7 +1307,7 @@ async def _video_detail(ws, account, state_path, aweme_id, chromium):
     if not state_path.exists():
         raise CollectorError(f"missing Douyin storage state; run login/import-cookies first: {state_path}")
     grabbed: dict[str, Any] = {}
-    grabbed_response_ids: dict[str, str] = {}
+    grabbed_request_ids: dict[str, str] = {}
     async_playwright = _import_playwright()
     landing_body = ""
     async with async_playwright() as p, _browser(p, chromium) as browser:
@@ -1292,13 +1320,12 @@ async def _video_detail(ws, account, state_path, aweme_id, chromium):
                 if frag in url and name not in grabbed:
                     try:
                         grabbed[name] = await resp.json()
-                        if name == "compare":
-                            # A valid partial response can have an empty ``item``. The observed
-                            # item_compare request still carries ``item_id``; retain only that
-                            # non-secret identity value, never the signed URL or query string.
-                            response_aweme_id = _detail_response_aweme_id(url)
-                            if response_aweme_id:
-                                grabbed_response_ids[name] = response_aweme_id
+                        # Retain only the non-secret work id for each intercepted
+                        # request, never the signed URL or full query string. Partial
+                        # results use these ids to bind every preserved endpoint.
+                        request_aweme_id = _detail_request_aweme_id(url)
+                        if request_aweme_id:
+                            grabbed_request_ids[name] = request_aweme_id
                     except Exception:
                         pass
 
@@ -1348,7 +1375,7 @@ async def _video_detail(ws, account, state_path, aweme_id, chromium):
                          portrait=grabbed.get("portrait") or {})
     partial_diagnostics = _detail_metrics_diagnostics(
         aweme_id=str(aweme_id), compare=grabbed["compare"], row=row,
-        response_aweme_id=grabbed_response_ids.get("compare", ""))
+        request_aweme_ids=grabbed_request_ids)
     result = {
         "schema_version": schema.SCHEMA_VERSION,
         "account": account, "platform": "douyin",

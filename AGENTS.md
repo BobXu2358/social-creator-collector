@@ -222,11 +222,12 @@ lists, stdout keys, and raw-file envelope shapes are in `docs/CLI_REFERENCE.md`.
   progress curves, the **搜索词** that surfaced the work, and an audience portrait. The
   Douyin detail endpoints reject a raw fetch (the page signs them), so video-detail
   navigates work-detail and intercepts the responses — the same pattern as `comments`.
-  All rate fields are pre-normalized to percent. If the intercepted `item_compare`
-  request identifies the requested work but its play metrics are unavailable, the
-  command preserves useful data from the other detail endpoints as a partial result
-  with `warning`/`diagnostics`; secondary endpoints cannot bypass that identity gate.
-  A response without work identity still fails loudly rather than inventing zero metrics.
+  All rate fields are pre-normalized to percent. If `item_compare` play metrics are
+  unavailable, the command preserves useful data as a partial result only after every
+  retained detail endpoint is bound to the requested work ID. The `item_compare` request
+  ID alone is only a routing check and cannot bless secondary data. A response without
+  work identity or with unbound/mismatched detail still fails loudly rather than
+  inventing zero metrics.
 - **Three platform quirks worth knowing.** Bilibili's `avg_completion_pct` is the mean
   watched fraction (avg progress ÷ duration), not the share who reached the end; its
   "播放量来源" is a *terminal* split (手机/PC/电视), not a recommend/search traffic source —
