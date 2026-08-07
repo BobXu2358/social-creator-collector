@@ -129,7 +129,7 @@ the same object as the persisted raw file.
 | `douyin fan-trend` | `ok`, `json`, `markdown`, `account_fan_total`, `fan_inc_total`, `rows` | |
 | `douyin worklist` | `ok`, `json`, `markdown`, `account_fan_total`, `items`, `selected` | |
 | `douyin item-analysis` | `ok`, `json`, `markdown`, `items` | |
-| `douyin video-detail` | `ok`, `json`, `markdown`, `aweme_id`, `completion_rate_pct`, `avg_watch_duration_s`, `traffic_sources` | |
+| `douyin video-detail` | `ok`, `json`, `markdown`, `aweme_id`, `completion_rate_pct`, `avg_watch_duration_s`, `traffic_sources`; `partial`, `warning` when item metrics are unavailable but identified, request-bound detail data exists | `ok=true, partial=true` does not guarantee every video metric is present; unavailable metrics are omitted. A response without work identity, or with unbound/mismatched detail, still fails. |
 | `douyin fan-growth` | `ok`, `json`, `markdown`, `rows` | |
 | `douyin comments` | `ok`, `json`, `aweme_id`, `comments`; `warning` when no API responses | No `markdown`. |
 
@@ -151,7 +151,7 @@ dynamics` carry `schema_version` but use command-specific row structures.
 | Douyin fan-trend | `schema_version`, `account`, `platform`, `source`, `captured_at`, `range`, `metric_labels`, `field_notes`, `account_fan_total`, `fan_inc_total`, `fan_trend` | `fan_trend` rows are `fan_trend_row`. |
 | Douyin worklist | `schema_version`, `account`, `platform`, `source`, `captured_at`, `range`, `account_fan_total`, `field_notes`, `page_count`, `item_count`, `items`, `selected_items`, `pages`; `warning`, `diagnostics` when no items | `items`/`selected_items` rows are `video_row`; `diagnostics` includes `landing_on_login_page`, `likely_login_required`, `pages`. |
 | Douyin item-analysis | `schema_version`, `account`, `platform`, `source`, `captured_at`, `range`, `field_notes`, `account_overview`, `item_count`, `items`; `warning` when no items | `items` rows are `video_row`. |
-| Douyin video-detail | `schema_version`, `account`, `platform`, `source`, `captured_at`, `aweme_id`, `endpoints_seen`, `field_notes`, `video` | `video` is a `video_row`. |
+| Douyin video-detail | `schema_version`, `account`, `platform`, `source`, `captured_at`, `aweme_id`, `endpoints_seen`, `field_notes`, `video`; `partial`, `warning`, `diagnostics` when item metrics are unavailable but identified, request-bound detail data exists | `video` is a `video_row`; partial diagnostics use `reason=item_compare_metrics_unavailable`, record the non-secret `identity_source`, and list preserved `available_data`. No signed URL or full query string is stored. |
 | Douyin fan-growth | `schema_version`, `account`, `platform`, `metric`, `source`, `captured_at`, `scroll_rounds`, `row_count`, `rows`, `field_notes`, `note` | `rows` are `video_row` with null `content_id`. |
 | Douyin comments | `account`, `platform`, `aweme_id`, `collected_at`, `comment_count`, `api_pages_intercepted`, `comments`; `warning`, `diagnostics` when no API responses | No `schema_version`; `diagnostics` includes `api_pages_intercepted`, `comment_api_seen`, `landing_on_login_page`. |
 
