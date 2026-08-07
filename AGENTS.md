@@ -166,7 +166,7 @@ are in `docs/CLI_REFERENCE.md`.
 | `douyin import-cookies --account X` | cookies → Playwright storage state + verify login |
 | `douyin worklist --account X --days 30` | creator-center work list + basic metrics + account_fan_total (当前粉丝总数); `--days 0` means all available works |
 | `douyin item-analysis --account X --days 30` | per-work avg watch time + 5s完播率 + 2s跳出率 (作品分析批量) |
-| `douyin video-detail --account X --aweme-id ID` | single-video 完播率 + 流量来源 + 进度曲线 + 搜索词 + 观众画像 (分析详情) |
+| `douyin video-detail --account X --aweme-id ID` | single-video 完播率 + 流量来源 + 进度曲线 + 搜索词 + 观众画像 (分析详情); returns a warned partial result when item metrics are unavailable but other detail data exists |
 | `douyin fan-trend --account X --days 30` | daily net fans + related overview metrics + account_fan_total (当前粉丝总数); `--days` choices `7/15/30`; includes `fan_inc_total` |
 | `douyin fan-growth --account X` | **per-video 粉丝增量** from 投稿列表 DOM |
 | `douyin comments --account X --aweme-id ID` | collect video comments |
@@ -222,7 +222,10 @@ lists, stdout keys, and raw-file envelope shapes are in `docs/CLI_REFERENCE.md`.
   progress curves, the **搜索词** that surfaced the work, and an audience portrait. The
   Douyin detail endpoints reject a raw fetch (the page signs them), so video-detail
   navigates work-detail and intercepts the responses — the same pattern as `comments`.
-  All rate fields are pre-normalized to percent.
+  All rate fields are pre-normalized to percent. If `item_compare` identifies the work
+  or another detail endpoint returns useful data but its play metrics are unavailable,
+  the command preserves that data as a partial result with `warning`/`diagnostics`;
+  a completely empty response still fails loudly rather than inventing zero metrics.
 - **Three platform quirks worth knowing.** Bilibili's `avg_completion_pct` is the mean
   watched fraction (avg progress ÷ duration), not the share who reached the end; its
   "播放量来源" is a *terminal* split (手机/PC/电视), not a recommend/search traffic source —

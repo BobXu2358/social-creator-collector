@@ -1183,6 +1183,45 @@ def _dy_detail_row(*, account: str, captured: str, aweme_id: str, compare: dict[
     return row
 
 
+def _detail_metrics_diagnostics(*, aweme_id: str, compare: dict[str, Any],
+                                row: dict[str, Any]) -> dict[str, Any] | None:
+    """Allow useful partial detail while still rejecting an empty/foreign response."""
+    item = (compare or {}).get("item") or {}
+    item_metrics = item.get("metrics") or {}
+    if item_metrics.get("view_count") not in (None, ""):
+        return None
+
+    detail = row.get("detail") or {}
+    available_data = []
+    if any(item.get(key) not in (None, "")
+           for key in ("id", "item_id", "aweme_id", "description", "create_time")):
+        available_data.append("identity")
+    if row.get("metrics"):
+        available_data.append("item_metrics")
+    if detail.get("traffic_source"):
+        available_data.append("traffic_source")
+    progress = detail.get("progress_analysis") or {}
+    if progress.get("drag_back_curve") or progress.get("drag_forward_curve"):
+        available_data.append("progress_analysis")
+    if detail.get("search_keywords"):
+        available_data.append("search_keywords")
+    if detail.get("engagement_rates_pct"):
+        available_data.append("engagement_rates_pct")
+    if (detail.get("peer_comparison") or {}).get("peer_count"):
+        available_data.append("peer_comparison")
+    if detail.get("audience"):
+        available_data.append("audience")
+
+    if not available_data:
+        raise CollectorError(
+            f"Douyin returned no metrics for aweme_id {aweme_id} — wrong id, or the work is not "
+            "yours. Pass an aweme_id from `douyin worklist`/`item-analysis`.")
+    return {
+        "reason": "item_compare_metrics_unavailable",
+        "available_data": available_data,
+    }
+
+
 def video_detail(*, ws: Path, account: str, state_path: Path, aweme_id: str,
                  chromium: str | None) -> dict[str, Any]:
     return asyncio.run(_video_detail(ws, account, state_path, aweme_id, chromium))
@@ -1246,19 +1285,13 @@ async def _video_detail(ws, account, state_path, aweme_id, chromium):
             "could not load Douyin single-video analysis (item_compare) — wrong aweme_id, the "
             "work is not yours, or Douyin changed work-detail. Update to the latest release or "
             "report upstream (see AGENTS.md 'Staying current').")
-    # item_compare returns 200 with an empty item for a bogus/foreign aweme_id — guard
-    # against silently emitting a metric-less row.
-    _item_metrics = ((grabbed["compare"].get("item") or {}).get("metrics")) or {}
-    if not _item_metrics or _item_metrics.get("view_count") in (None, ""):
-        raise CollectorError(
-            f"Douyin returned no metrics for aweme_id {aweme_id} — wrong id, or the work is not "
-            "yours. Pass an aweme_id from `douyin worklist`/`item-analysis`.")
-
     captured = datetime.now(TZ).isoformat()
     row = _dy_detail_row(account=account, captured=captured, aweme_id=str(aweme_id),
                          compare=grabbed.get("compare") or {}, source=grabbed.get("source") or {},
                          progress=grabbed.get("progress") or {}, search=grabbed.get("search") or {},
                          portrait=grabbed.get("portrait") or {})
+    partial_diagnostics = _detail_metrics_diagnostics(
+        aweme_id=str(aweme_id), compare=grabbed["compare"], row=row)
     result = {
         "schema_version": schema.SCHEMA_VERSION,
         "account": account, "platform": "douyin",
@@ -1275,6 +1308,12 @@ async def _video_detail(ws, account, state_path, aweme_id, chromium):
         },
         "video": row,
     }
+    if partial_diagnostics:
+        result["partial"] = True
+        result["warning"] = (
+            "item_compare returned no play metrics; preserved the other available "
+            "single-video detail data")
+        result["diagnostics"] = partial_diagnostics
     raw, processed = output_dirs(ws, account, "douyin")
     stamp = _stamp()
     jp = raw / f"douyin-video-detail-{aweme_id}-{stamp}.json"
@@ -1282,10 +1321,15 @@ async def _video_detail(ws, account, state_path, aweme_id, chromium):
     jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     mp.write_text(_render_dy_detail_md(row), encoding="utf-8")
     m = row["metrics"]
-    return {"ok": True, "json": str(jp), "markdown": str(mp), "aweme_id": str(aweme_id),
-            "completion_rate_pct": m.get("completion_rate_pct"),
-            "avg_watch_duration_s": m.get("avg_watch_duration_s"),
-            "traffic_sources": len(row.get("detail", {}).get("traffic_source") or [])}
+    summary = {"ok": True, "json": str(jp), "markdown": str(mp),
+               "aweme_id": str(aweme_id),
+               "completion_rate_pct": m.get("completion_rate_pct"),
+               "avg_watch_duration_s": m.get("avg_watch_duration_s"),
+               "traffic_sources": len(row.get("detail", {}).get("traffic_source") or [])}
+    if partial_diagnostics:
+        summary["partial"] = True
+        summary["warning"] = result["warning"]
+    return summary
 
 
 def _render_dy_detail_md(row: dict[str, Any]) -> str:

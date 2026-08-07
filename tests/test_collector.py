@@ -917,6 +917,42 @@ class PerVideoDetailHelpers(unittest.TestCase):
         self.assertEqual(d["peer_comparison"]["peer_aweme_ids"][0], "7600000000000000001")
         self.assertEqual(d["audience"]["gender"][0]["key"], "男")
 
+    def test_douyin_detail_metrics_diagnostics_accepts_partial_payload(self):
+        compare = {
+            "item": {"description": "valid work", "create_time": "1749468000", "metrics": {}},
+            "compare_item_ids": ["7600000000000000001"],
+        }
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
+            source={"play_source": [{"key": "follow", "value": 0.5}]},
+            progress={}, search={}, portrait={})
+
+        diagnostics = douyin._detail_metrics_diagnostics(
+            aweme_id="7648986531704638726", compare=compare, row=row)
+
+        self.assertEqual(diagnostics["reason"], "item_compare_metrics_unavailable")
+        self.assertIn("identity", diagnostics["available_data"])
+        self.assertIn("traffic_source", diagnostics["available_data"])
+        self.assertNotIn("plays", row["metrics"])
+
+    def test_douyin_detail_metrics_diagnostics_keeps_complete_result(self):
+        compare = {"item": {"metrics": {"view_count": "100"}}}
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
+            source={}, progress={}, search={}, portrait={})
+
+        self.assertIsNone(douyin._detail_metrics_diagnostics(
+            aweme_id="7648986531704638726", compare=compare, row=row))
+
+    def test_douyin_detail_metrics_diagnostics_rejects_empty_payload(self):
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare={"item": {}},
+            source={}, progress={}, search={}, portrait={})
+
+        with self.assertRaisesRegex(douyin.CollectorError, "returned no metrics"):
+            douyin._detail_metrics_diagnostics(
+                aweme_id="7648986531704638726", compare={"item": {}}, row=row)
+
     def test_overview_block_adds_value_pct_for_rates(self):
         block = douyin._overview_block({
             "completion_rate_5s": {"metric_name": "条均5s完播率", "metric_value": 0.5112},
