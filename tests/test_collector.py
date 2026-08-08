@@ -699,6 +699,33 @@ class RetryBehavior(unittest.TestCase):
         client = _SeqClient([_Resp(200, {"code": 0, "data": {}}), _Resp(200, {"code": 0, "data": {}})])
         self.assertIsNone(bilibili._account_fan_total(client, 123))
 
+    def test_summary_budget_caps_request_timeout_and_records_stage_timing(self):
+        class _BudgetClient:
+            def __init__(self):
+                self.timeout = None
+
+            def get(self, _url, *, params, timeout):
+                self.timeout = timeout
+                return _Resp(200, {"code": 0, "data": {"ok": 1}})
+
+        client = _BudgetClient()
+        budget = bilibili._SummaryBudget()
+        token = bilibili._ACTIVE_SUMMARY_BUDGET.set(budget)
+        try:
+            obj = bilibili._get_json(client, "https://api.bilibili.com/x/test")
+        finally:
+            bilibili._ACTIVE_SUMMARY_BUDGET.reset(token)
+
+        self.assertEqual(obj["data"]["ok"], 1)
+        self.assertLessEqual(client.timeout, bilibili._SUMMARY_REQUEST_TIMEOUT_S)
+        self.assertEqual(budget.diagnostics()["stages"]["/x/test"]["requests"], 1)
+
+    def test_summary_budget_fails_before_starting_a_request_after_deadline(self):
+        budget = bilibili._SummaryBudget(limit_s=0)
+        with self.assertRaises(CollectorError) as ctx:
+            budget.request_timeout_s("/x/test")
+        self.assertIn("deadline exceeded", str(ctx.exception))
+
     def test_retries_transient_then_succeeds(self):
         client = _SeqClient([httpx.ConnectError("boom"), _Resp(503),
                              _Resp(200, {"code": 0, "data": {"ok": 1}})])

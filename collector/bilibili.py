@@ -10,6 +10,7 @@ Commands: probe, summary, video-detail, dynamics, fan-source, comments, danmaku.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import re
@@ -18,6 +19,7 @@ import sys
 import time
 import urllib.parse
 from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -78,6 +80,54 @@ def _client(cookie: str | None = None, referer: str = "https://www.bilibili.com/
 
 # 429 + 5xx are worth a retry; other 4xx and the JSON-level risk codes are not.
 _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+_SUMMARY_BUDGET_S = 90.0
+_SUMMARY_REQUEST_TIMEOUT_S = 20.0
+
+
+@dataclass
+class _SummaryBudget:
+    """Keep ``summary`` comfortably inside a caller's 120-second process limit."""
+
+    limit_s: float = _SUMMARY_BUDGET_S
+    started_at: float = field(default_factory=time.monotonic)
+    timings: dict[str, dict[str, float | int]] = field(default_factory=dict)
+
+    def remaining_s(self, stage: str) -> float:
+        remaining = self.limit_s - (time.monotonic() - self.started_at)
+        if remaining <= 0:
+            raise CollectorError(
+                f"Bilibili summary deadline exceeded at {stage}; "
+                f"elapsed={self.limit_s:.1f}s budget={self.limit_s:.1f}s"
+            )
+        return remaining
+
+    def request_timeout_s(self, stage: str) -> float:
+        return min(_SUMMARY_REQUEST_TIMEOUT_S, self.remaining_s(stage))
+
+    def record(self, stage: str, elapsed_s: float) -> None:
+        timing = self.timings.setdefault(stage, {"requests": 0, "elapsed_ms": 0.0, "max_ms": 0.0})
+        timing["requests"] = int(timing["requests"]) + 1
+        timing["elapsed_ms"] = round(float(timing["elapsed_ms"]) + elapsed_s * 1000, 1)
+        timing["max_ms"] = round(max(float(timing["max_ms"]), elapsed_s * 1000), 1)
+
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "budget_ms": int(self.limit_s * 1000),
+            "elapsed_ms": round((time.monotonic() - self.started_at) * 1000, 1),
+            "stages": self.timings,
+        }
+
+
+_ACTIVE_SUMMARY_BUDGET: contextvars.ContextVar[_SummaryBudget | None] = contextvars.ContextVar(
+    "active_bilibili_summary_budget", default=None
+)
+
+
+def _request_stage(url: str, params: dict[str, Any] | None) -> str:
+    path = urllib.parse.urlsplit(url).path
+    if params and "pn" in params:
+        return f"{path} page={params['pn']}"
+    return path
 
 
 def _safe_url_for_error(url: Any, *, redact_query: bool | tuple[str, ...] = False) -> str:
@@ -109,9 +159,17 @@ def _get_json(client: httpx.Client, url: str, params: dict[str, Any] | None = No
     makes things worse, so they fail loud immediately.
     """
     last = "no attempt made"
+    budget = _ACTIVE_SUMMARY_BUDGET.get()
+    stage = _request_stage(url, params)
     for attempt in range(retries + 1):
+        started_at = time.monotonic()
         try:
-            resp = client.get(url, params=params or {})
+            if budget is None:
+                resp = client.get(url, params=params or {})
+            else:
+                resp = client.get(
+                    url, params=params or {}, timeout=budget.request_timeout_s(stage),
+                )
         except httpx.TransportError as exc:  # timeout, connection reset, DNS — transient
             last = f"network error: {exc}"
         else:
@@ -129,8 +187,14 @@ def _get_json(client: httpx.Client, url: str, params: dict[str, Any] | None = No
                         f"Bilibili API error code={code} message={obj.get('message')!r} url={safe_url}"
                     )
                 return obj
+        finally:
+            if budget is not None:
+                budget.record(stage, time.monotonic() - started_at)
         if attempt < retries:
-            time.sleep(backoff_s * (2 ** attempt))
+            backoff = backoff_s * (2 ** attempt)
+            if budget is not None:
+                backoff = min(backoff, budget.remaining_s(stage))
+            time.sleep(backoff)
     safe_url = _safe_url_for_error(url, redact_query=redact_query)
     raise CollectorError(f"Bilibili request to {safe_url} failed after {retries + 1} attempts ({last})")
 
@@ -377,7 +441,10 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
     creds = load_credentials(credential_path)
     cookie = cookie_header(creds)
     referer = "https://member.bilibili.com/york/data-center-web?tmid=&bvid=&tab="
-    with _client(cookie, referer) as c:
+    budget = _SummaryBudget()
+    budget_token = _ACTIVE_SUMMARY_BUDGET.set(budget)
+    try:
+      with _client(cookie, referer) as c:
         # fail loud before doing real work
         nav = _get_json(c, "https://api.bilibili.com/x/web-interface/nav").get("data") or {}
         if not nav.get("isLogin"):
@@ -455,6 +522,14 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
             last_pub = _date_from_epoch(last_pubtime)
             if last_pub and last_pub.date() < video_start:
                 break
+    except CollectorError as exc:
+        diagnostics = budget.diagnostics()
+        raise CollectorError(
+            f"Bilibili summary failed after {diagnostics['elapsed_ms']}ms; {exc}; "
+            f"stage_timings={diagnostics['stages']}"
+        ) from exc
+    finally:
+        _ACTIVE_SUMMARY_BUDGET.reset(budget_token)
     videos.sort(key=lambda r: r["published_at"] or "", reverse=True)
 
     result = {
@@ -465,6 +540,7 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
         "range": {"start": start.isoformat(), "end": latest.isoformat(), "days": days},
         "video_range": {"start": video_start.isoformat(), "end": video_latest.isoformat(), "days": days},
         "captured_at": captured,
+        "diagnostics": {"request_timing": budget.diagnostics()},
         "field_notes": {
             "duration_s": "Video duration in seconds, from creator archive data or public view metadata.",
             "cover_url": "Cover image URL from creator archive data or public view metadata.",
