@@ -155,7 +155,7 @@ are in `docs/CLI_REFERENCE.md`.
 | `init --account X` | create folder structure + example credential files |
 | `bilibili login --account X` | QR scan login (headed browser) → credential file |
 | `bilibili probe --account X` | verify B站 login + identity (fails loud if cookie expired) |
-| `bilibili summary --account X --days 30` | account_fan_total (当前粉丝总数) + fan_inc_total + API-anchored fan `range` + collection-date-anchored `video_range` + per-video play/fans/coin/reply/likes |
+| `bilibili summary --account X --days 30` | account_fan_total (当前粉丝总数) + fan_inc_total + API-anchored fan `range` + collection-date-anchored `video_range` + per-video play/fans/coin/reply/likes + bounded request-timing diagnostics |
 | `bilibili video-detail --account X --bvid BVxxx` | single-video retention curve + completion + follower/guest split + audience + 封标点击率 relative signals + 3秒跳出率 |
 | `bilibili fan-source --account X` | fan source distribution (video/search/space/etc.) |
 | `bilibili dynamics --account X --days 30` | 动态 timeline: 视频/图文/转发/互动抽奖 + forward source + lottery detection sources (WBI-signed space feed) |
@@ -196,6 +196,11 @@ lists, stdout keys, and raw-file envelope shapes are in `docs/CLI_REFERENCE.md`.
 - **Douyin per-video fan growth has no API** — it only exists in the 投稿列表 table DOM.
   `douyin fan-growth` locates the 粉丝增量 column by header text and fails loud if Douyin
   redesigns the table (rather than silently returning a wrong column).
+- **Bilibili summary has a bounded request budget.** Its API-acquisition stages share a
+  90-second budget; each request is capped at 20 seconds and retries respect the remaining
+  time. Successful raw output records `diagnostics.request_timing`; failures include
+  sanitized `stage_timings`. Keep an outer process timeout (120 seconds is the intended
+  margin), but inspect the slow stage before raising it to 240 seconds.
 - **Douyin collaboration metadata is account-context-sensitive.** `douyin worklist` may
   emit `platform_fields.is_collaboration: true` plus `creator_role` (`primary`,
   `collaborator`, or `unknown`). Treat absence as unavailable, not `false`. A collaborator
