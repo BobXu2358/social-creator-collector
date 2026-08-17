@@ -36,6 +36,30 @@ on the latest date that API returned, while `video_range` is the video publish w
 ending on the collection date in `Asia/Shanghai`. `fan_inc_total` sums the daily rows in
 `range`.
 
+## Douyin collaborative works
+
+`douyin worklist` may attach collaboration metadata to a canonical row:
+
+```json
+{
+  "platform_fields": {
+    "is_collaboration": true,
+    "creator_role": "collaborator"
+  }
+}
+```
+
+Use it conservatively:
+
+- only `is_collaboration is true` confirms a collaborative work; a missing field is unknown;
+- `creator_role` is `primary`, `collaborator`, or `unknown` for the current account;
+- retain a collaborator's basic work row, but run `video-detail` under the primary account
+  when collaborator-side detail is unavailable;
+- never copy account-context-sensitive analytics between accounts.
+
+The collector compares creator IDs in memory and does not emit IDs, collaborator names,
+contribution roles, or a generic co-creator count.
+
 ## Douyin per-video fan growth (粉丝增量)
 
 There is **no API** for per-video fan growth; it lives only in the 投稿列表 table DOM of

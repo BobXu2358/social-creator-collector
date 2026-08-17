@@ -343,6 +343,23 @@ _FETCH_JSON_JS = """async (url) => {
 }"""
 
 
+def _user_info_containers(obj: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Return valid user-info containers without exposing their identity values."""
+    js = (obj or {}).get("json")
+    if not isinstance(js, dict):
+        return ()
+    code = js.get("status_code", js.get("code", 0))
+    try:
+        if int(code) != 0:
+            return ()
+    except (TypeError, ValueError):
+        return ()
+    return tuple(
+        container for container in (js.get("user"), js.get("user_info"), js)
+        if isinstance(container, dict)
+    )
+
+
 def _account_fan_total_from_user_info(obj: dict[str, Any]) -> int | None:
     """Pull the current follower total out of a user-info response. Pure → testable.
 
@@ -350,18 +367,7 @@ def _account_fan_total_from_user_info(obj: dict[str, Any]) -> int | None:
     top level, under the names Douyin has used for the count. ``None`` when the
     response is an error, non-JSON, or simply lacks the field.
     """
-    js = (obj or {}).get("json")
-    if not isinstance(js, dict):
-        return None
-    code = js.get("status_code", js.get("code", 0))
-    try:
-        if int(code) != 0:
-            return None
-    except (TypeError, ValueError):
-        return None
-    for container in (js.get("user"), js.get("user_info"), js):
-        if not isinstance(container, dict):
-            continue
+    for container in _user_info_containers(obj):
         for key in ("follower_count", "fans_count", "total_fans"):
             value = _parse_int(container.get(key))
             if value is not None:
@@ -369,13 +375,28 @@ def _account_fan_total_from_user_info(obj: dict[str, Any]) -> int | None:
     return None
 
 
+def _creator_identity_from_user_info(obj: dict[str, Any]) -> dict[str, str]:
+    """Extract ephemeral IDs used only to classify the current account's work role."""
+    identity: dict[str, str] = {}
+    for container in _user_info_containers(obj):
+        for key in ("uid", "sec_uid"):
+            value = container.get(key)
+            if value not in (None, "", 0, "0"):
+                identity.setdefault(key, str(value))
+    return identity
+
+
+async def _fetch_creator_user_info(page) -> dict[str, Any]:
+    """Best-effort creator user info; callers must never persist identity fields."""
+    try:
+        return await page.evaluate(_FETCH_JSON_JS, _USER_INFO_URL)
+    except Exception:
+        return {}
+
+
 async def _fetch_account_fan_total(page) -> int | None:
     """Best-effort 账号当前粉丝总数 from an open creator.douyin.com page."""
-    try:
-        obj = await page.evaluate(_FETCH_JSON_JS, _USER_INFO_URL)
-    except Exception:
-        return None
-    return _account_fan_total_from_user_info(obj or {})
+    return _account_fan_total_from_user_info(await _fetch_creator_user_info(page))
 
 
 # ── work list (basic per-video metrics) ──────────────────────────────────
@@ -434,6 +455,66 @@ def _first_url(value: Any) -> str | None:
     return None
 
 
+def _identity_matches(
+    identity: dict[str, str], candidate: Any, *, alternate_uid: Any = None,
+) -> bool:
+    """Compare same-kind ephemeral IDs without copying them into collector output."""
+    if not identity or not isinstance(candidate, dict):
+        return False
+    uid = identity.get("uid")
+    sec_uid = identity.get("sec_uid")
+    return bool(
+        (uid and any(str(value) == uid for value in (candidate.get("uid"), alternate_uid)
+                     if value not in (None, "", 0, "0")))
+        or (sec_uid and candidate.get("sec_uid") not in (None, "", 0, "0")
+            and str(candidate.get("sec_uid")) == sec_uid)
+    )
+
+
+def _cooperation_flag(info: dict[str, Any]) -> bool:
+    """Accept only Douyin's explicit collaboration marker from the JSON-in-string field."""
+    extra = info.get("extra")
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+    if not isinstance(extra, dict):
+        return False
+    try:
+        return int(extra.get("is_cooperation")) == 1
+    except (TypeError, ValueError):
+        return False
+
+
+def _normalize_cooperation(
+    aweme: dict[str, Any], creator_identity: dict[str, str] | None,
+) -> dict[str, Any]:
+    """Classify a collaborative work without retaining creator identity or names.
+
+    ``role_id`` / ``role_title`` describe contribution types such as 出镜, not
+    publishing ownership, so role classification uses only identity placement:
+    top-level author = primary; an entry in co_creators = collaborator.
+    """
+    info = aweme.get("cooperation_info") or aweme.get("CooperationInfo")
+    if not isinstance(info, dict) or not _cooperation_flag(info):
+        return {}
+
+    identity = creator_identity or {}
+    author = aweme.get("author") or aweme.get("Author") or {}
+    primary = _identity_matches(identity, author, alternate_uid=aweme.get("author_user_id"))
+    co_creators = info.get("co_creators")
+    collaborator = bool(
+        isinstance(co_creators, list)
+        and any(_identity_matches(identity, creator) for creator in co_creators)
+    )
+    if primary == collaborator:
+        role = "unknown"
+    else:
+        role = "primary" if primary else "collaborator"
+    return {"is_collaboration": True, "creator_role": role}
+
+
 def _aweme_canonical(n: dict[str, Any], account: str, captured_at: str) -> dict[str, Any]:
     """Map an internal normalized aweme to a canonical video row."""
     row = schema.video_row(
@@ -450,6 +531,8 @@ def _aweme_canonical(n: dict[str, Any], account: str, captured_at: str) -> dict[
             row[key] = n[key]
     platform_fields = {
         "forward": n.get("forward"),
+        "is_collaboration": n.get("is_collaboration"),
+        "creator_role": n.get("creator_role"),
     }
     platform_fields = {k: v for k, v in platform_fields.items() if v not in (None, "")}
     if platform_fields:
@@ -658,7 +741,9 @@ async def _fan_trend(ws, account, state_path, days, chromium) -> dict[str, Any]:
             "fan_inc_total": result["fan_inc_total"], "rows": len(rows)}
 
 
-def _normalize_aweme(a: dict[str, Any]) -> dict[str, Any]:
+def _normalize_aweme(
+    a: dict[str, Any], creator_identity: dict[str, str] | None = None,
+) -> dict[str, Any]:
     stat = a.get("Statistics") or a.get("statistics") or {}
     video = a.get("Video") or a.get("video") or {}
     item = {
@@ -687,6 +772,7 @@ def _normalize_aweme(a: dict[str, Any]) -> dict[str, Any]:
         item[out] = _pick(a, *names) or _pick(stat, *names)
     if item["aweme_id"]:
         item["url"] = f"https://www.douyin.com/video/{item['aweme_id']}"
+    item.update(_normalize_cooperation(a, creator_identity))
     return item
 
 
@@ -708,7 +794,9 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
         await page.goto("https://creator.douyin.com/creator-micro/content/manage",
                         wait_until="domcontentloaded", timeout=60000)
         landing_body = await _body_text_with_markers(page, _WORKLIST_READY_MARKERS, timeout_ms=10000)
-        account_fan_total = await _fetch_account_fan_total(page)
+        user_info = await _fetch_creator_user_info(page)
+        account_fan_total = _account_fan_total_from_user_info(user_info)
+        creator_identity = _creator_identity_from_user_info(user_info)
         cursor = 0
         for pn in range(1, max_pages + 1):
             url = ("/janus/douyin/creator/pc/work_list?scene=star_atlas"
@@ -733,7 +821,7 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
     seen: set[Any] = set()
     items: list[dict[str, Any]] = []
     for a in all_items:
-        n = _normalize_aweme(a)
+        n = _normalize_aweme(a, creator_identity)
         key = n.get("aweme_id") or id(a)
         if key in seen:
             continue
@@ -763,6 +851,10 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
             "duration_s": "Video duration in seconds; Douyin work_list duration is normalized from milliseconds when needed.",
             "metrics.shares": "Uses the work_list share/share_count value as the display share count.",
             "platform_fields.forward": "Raw forward/forward_count value when present; semantics are not used as display shares.",
+            "platform_fields.is_collaboration": "true only when Douyin explicitly marks the work as collaborative; "
+                                                "absence means unknown, not false.",
+            "platform_fields.creator_role": "Current account's role: primary, collaborator, or unknown. Identity values "
+                                            "are compared in memory and are never emitted.",
         },
         "page_count": len(pages_meta), "item_count": len(items_c),
         "items": items_c, "selected_items": rows_c, "pages": pages_meta,

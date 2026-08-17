@@ -164,7 +164,7 @@ are in `docs/CLI_REFERENCE.md`.
 | `douyin login --account X` | QR scan login (headed browser) → storage state |
 | `douyin check-cookies --account X` | validate a Cookie-Editor export's structure |
 | `douyin import-cookies --account X` | cookies → Playwright storage state + verify login |
-| `douyin worklist --account X --days 30` | creator-center work list + basic metrics + account_fan_total (当前粉丝总数); `--days 0` means all available works |
+| `douyin worklist --account X --days 30` | creator-center work list + basic metrics + account_fan_total (当前粉丝总数) + confirmed collaboration flag/current-account role when available; `--days 0` means all available works |
 | `douyin item-analysis --account X --days 30` | per-work avg watch time + 5s完播率 + 2s跳出率 (作品分析批量) |
 | `douyin video-detail --account X --aweme-id ID` | single-video 完播率 + 流量来源 + 进度曲线 + 搜索词 + 观众画像 (分析详情); returns a warned partial result when item metrics are unavailable but other detail data exists |
 | `douyin fan-trend --account X --days 30` | daily net fans + related overview metrics + account_fan_total (当前粉丝总数); `--days` choices `7/15/30`; includes `fan_inc_total` |
@@ -196,6 +196,12 @@ lists, stdout keys, and raw-file envelope shapes are in `docs/CLI_REFERENCE.md`.
 - **Douyin per-video fan growth has no API** — it only exists in the 投稿列表 table DOM.
   `douyin fan-growth` locates the 粉丝增量 column by header text and fails loud if Douyin
   redesigns the table (rather than silently returning a wrong column).
+- **Douyin collaboration metadata is account-context-sensitive.** `douyin worklist` may
+  emit `platform_fields.is_collaboration: true` plus `creator_role` (`primary`,
+  `collaborator`, or `unknown`). Treat absence as unavailable, not `false`. A collaborator
+  can retain the basic work row but may lack access to `video-detail`; collect that detail
+  from the primary publishing account instead of copying analytics across accounts. The
+  collector compares creator IDs only in memory and never emits them or collaborator names.
 - **Douyin account-level daily net fans do have a creator-center overview API.**
   `douyin fan-trend --days 30` reads `new_fans.option_list` from that API; this is the
   right input for campaign lift analysis. It also carries related daily overview metrics

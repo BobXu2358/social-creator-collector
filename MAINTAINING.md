@@ -27,6 +27,42 @@ Don't add a database, retention policy, or business accounts to the core — tha
 
 Link to the owning document instead of copying its full content into another file.
 
+### Field documentation standard
+
+Treat an output field as incomplete until a consumer can use it correctly without
+reading the implementation. For every new or changed user-visible field, document:
+
+1. **Path and scope** — the exact JSON path, which command/envelope emits it, and
+   whether it is account-level, per-work, daily, or command-specific.
+2. **Type, unit, and values** — including enums, percentage normalization, time zone,
+   count semantics, and whether a platform-native value is preserved raw.
+3. **Presence semantics** — distinguish absent, `null`, zero, `false`, and `unknown`.
+   Never let consumers infer a negative fact merely because the platform omitted a field.
+4. **Provenance and certainty** — say whether the value is directly reported by the
+   platform, normalized by the collector, or inferred from multiple fields. Label
+   unverified interpretations as inference instead of presenting them as an API contract.
+5. **Context and privacy boundaries** — record whether a value is account-context-sensitive
+   and which source identifiers or private fields must be compared only in memory and never
+   emitted, logged, indexed, or copied between accounts.
+6. **Consumer action** — when the field changes downstream behavior, include one short,
+   sanitized example showing the safe branch/fallback. Examples must not contain real
+   account IDs, work IDs, cookies, tokens, signed URLs, nicknames, or private payloads.
+
+Put the detail in the owning surface and keep summaries short:
+
+| Change | Required documentation |
+|---|---|
+| Canonical or command output field | `docs/CLI_REFERENCE.md`, runtime `field_notes`, tests; update the JSON Schema when its explicit contract changes |
+| Headline capability or quick-start behavior | `README.md` summary plus a link to the CLI reference |
+| Operator safety, account context, failure, or recovery behavior | `AGENTS.md` |
+| Reusable collection/analysis decision | the affected file under `skills/` |
+| Breaking contract change | schema version, this file's version history, CLI reference, migration note, and consumer tests |
+
+An additive optional field does not require a schema-version bump, but it still requires
+documentation of its presence semantics, a representative sanitized fixture, and tests for
+present, absent, and malformed inputs. Do not document speculative fields before live evidence
+confirms their path and meaning.
+
 ## Updating the core
 
 It's a normal git-installed package. Consumers should pin a tag:
@@ -51,10 +87,17 @@ To ship a change:
 - [ ] If it adds, renames, removes, or changes the meaning or unit of an output field
       or envelope, update the schema description or version, CLI output reference,
       schema notes in this file, and affected skills in the same PR.
+- [ ] For every affected field, document its exact path, type/unit or enum, presence
+      semantics, provenance/certainty, account context, and privacy boundary.
+- [ ] If the field changes downstream decisions, add or update one sanitized usage example;
+      test present, absent, malformed, and privacy-sensitive cases where applicable.
 - [ ] If it changes a maintenance, release, discovery, or security process, update
       `MAINTAINING.md` and `AGENTS.md` in the same PR.
 - [ ] If it makes an example or platform comparison inaccurate, update every affected
       example and link in the same PR.
+- [ ] Search all documentation and skills for the old term or field name, then run
+      `git diff --check` and read the final diff as a consumer. Passing code tests alone
+      does not prove that field ownership, units, or success/failure semantics are documented.
 
 Documentation is part of the change, not a follow-up. Reviewers should not merge until
 every applicable item is complete.
