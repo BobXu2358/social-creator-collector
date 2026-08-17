@@ -142,7 +142,7 @@ dynamics` carry `schema_version` but use command-specific row structures.
 
 | Command | Raw-file envelope keys | Notes |
 |---|---|---|
-| Bilibili summary | `schema_version`, `account`, `platform`, `source`, `captured_at`, `range`, `video_range`, `field_notes`, `account_fan_total`, `fan_inc_total`, `fan_trend`, `videos` | `fan_trend` rows are `fan_trend_row`; `videos` rows are `video_row`. |
+| Bilibili summary | `schema_version`, `account`, `platform`, `source`, `captured_at`, `range`, `video_range`, `diagnostics`, `field_notes`, `account_fan_total`, `fan_inc_total`, `fan_trend`, `videos` | `fan_trend` rows are `fan_trend_row`; `videos` rows are `video_row`; `diagnostics.request_timing` reports the bounded acquisition budget and per-stage timings. |
 | Bilibili video-detail | `schema_version`, `account`, `platform`, `source`, `captured_at`, `bvid`, `cid`, `field_notes`, `video` | `video` is a `video_row`. |
 | Bilibili fan-source | `schema_version`, `account`, `platform`, `source`, `captured_at`, `source_total`, `sources` | Command-specific `sources` rows. |
 | Bilibili dynamics | `schema_version`, `account`, `platform`, `source`, `captured_at`, `host_mid`, `window_days`, `count`, `by_type`, `lottery_count`, `dynamics` | Command-specific `dynamics` rows. |
@@ -193,6 +193,41 @@ if platform_fields.get("is_collaboration") is True:
 
 Do not interpret a missing field as an independently published work, and do not
 use `role_id` / `role_title` as publishing ownership; those are contribution labels.
+
+### Bilibili summary deadline diagnostics
+
+`bilibili summary` uses a 90-second internal budget for its API-acquisition stages.
+Each individual HTTP request is capped at 20 seconds, and retries/backoff cannot start
+after the remaining budget is exhausted. This is designed to leave cleanup and output
+margin for callers with a 120-second process timeout; it is not a process-level kill
+timer, so callers should still enforce their own outer timeout.
+
+A successful raw result includes:
+
+```json
+{
+  "diagnostics": {
+    "request_timing": {
+      "budget_ms": 90000,
+      "elapsed_ms": 1234.5,
+      "stages": {
+        "/x/web/data/v2/overview/stat/graph": {
+          "requests": 1,
+          "elapsed_ms": 210.4,
+          "max_ms": 210.4
+        }
+      }
+    }
+  }
+}
+```
+
+Stage keys contain endpoint paths and, for paginated calls, a page number; they do not
+contain cookies or signed query strings. On failure, the one-line `ERROR` includes the
+elapsed time and sanitized `stage_timings`. Re-run with `--debug` only when a traceback
+is needed. Inspect the slow stage before increasing an outer timeout from 120 to 240
+seconds; the collector already bounds the upstream request path that caused the original
+intermittent hangs.
 
 ## Date windows and account-level semantics
 

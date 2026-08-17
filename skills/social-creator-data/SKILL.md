@@ -36,6 +36,16 @@ on the latest date that API returned, while `video_range` is the video publish w
 ending on the collection date in `Asia/Shanghai`. `fan_inc_total` sums the daily rows in
 `range`.
 
+If `bilibili summary` is slow or fails, use its bounded timing evidence before changing
+the caller:
+
+- API acquisition has a 90-second shared budget and a 20-second per-request cap;
+- successful raw JSON records `diagnostics.request_timing.stages` by sanitized endpoint path;
+- failures include elapsed time and `stage_timings`; add `--debug` only when the traceback
+  is needed;
+- retain a caller-side process timeout (120 seconds is the intended margin) and identify
+  the slow endpoint before increasing it to 240 seconds.
+
 ## Douyin collaborative works
 
 `douyin worklist` may attach collaboration metadata to a canonical row:
