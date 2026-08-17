@@ -165,6 +165,35 @@ Canonical row shapes are defined in `schemas/collector-output.schema.json`:
 Comments, danmaku, dynamics rows, and fan-source rows use command-specific
 structures that are not covered by the JSON Schema `$defs`.
 
+Douyin worklist rows may include two normalized collaboration fields under
+`platform_fields`:
+
+- `is_collaboration: true` appears only when the work-list response explicitly
+  marks the work as collaborative. Absence means unavailable/unknown, not `false`.
+- `creator_role` is `primary`, `collaborator`, or `unknown` for the current account.
+  The collector compares creator IDs in memory to distinguish the top-level author
+  from entries in `co_creators`; it never emits those IDs, collaborator names, or
+  contribution labels such as `role_title`.
+
+`unknown` means collaboration is confirmed but the current account could not be
+matched reliably. The collector does not expose a generic co-creator count because
+Douyin's invited and accepted counts can differ.
+
+Downstream consumers should branch only on an explicit `true` value:
+
+```python
+platform_fields = row.get("platform_fields") or {}
+if platform_fields.get("is_collaboration") is True:
+    role = platform_fields.get("creator_role", "unknown")
+    if role == "collaborator":
+        # Keep this basic row; collect account-sensitive video-detail from the
+        # primary publishing account instead of copying it between accounts.
+        request_primary_account_collection(row["content_id"])
+```
+
+Do not interpret a missing field as an independently published work, and do not
+use `role_id` / `role_title` as publishing ownership; those are contribution labels.
+
 ## Date windows and account-level semantics
 
 Bilibili `summary` uses two independent windows:

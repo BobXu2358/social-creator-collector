@@ -467,6 +467,88 @@ class PureParsers(unittest.TestCase):
         self.assertEqual((row["work_type"], row["status"], row["visibility"], row["audit_status"]),
                          (4, 2, "public", "pass"))
 
+    def test_creator_identity_from_user_info(self):
+        payload = {
+            "json": {
+                "status_code": 0,
+                "user": {
+                    "uid": "current-uid",
+                    "sec_uid": "current-sec-uid",
+                    "nickname": "must-not-be-retained",
+                },
+            },
+        }
+        self.assertEqual(douyin._creator_identity_from_user_info(payload), {
+            "uid": "current-uid",
+            "sec_uid": "current-sec-uid",
+        })
+        self.assertEqual(douyin._creator_identity_from_user_info(
+            {"json": {"status_code": 8, "user": {"uid": "should-not-be-used"}}}), {})
+
+    def test_normalize_aweme_classifies_collaboration_without_identity_leak(self):
+        aweme = {
+            "aweme_id": "work-1",
+            "author_user_id": 101,
+            "author": {"uid": "101", "sec_uid": "primary-sec", "nickname": "primary-name"},
+            "cooperation_info": {
+                "extra": json.dumps({"is_cooperation": 1, "author_mix_follower_count": 999}),
+                "co_creator_nums": 2,
+                "accepted_nums": 1,
+                "co_creators": [{
+                    "uid": "202", "sec_uid": "collaborator-sec", "nickname": "collaborator-name",
+                    "role_id": 13, "role_title": "出镜",
+                }],
+            },
+        }
+        primary = douyin._normalize_aweme(aweme, {"uid": "101", "sec_uid": "primary-sec"})
+        collaborator = douyin._normalize_aweme(
+            aweme, {"uid": "202", "sec_uid": "collaborator-sec"})
+        unknown = douyin._normalize_aweme(aweme, {})
+
+        self.assertEqual((primary["is_collaboration"], primary["creator_role"]), (True, "primary"))
+        self.assertEqual(
+            (collaborator["is_collaboration"], collaborator["creator_role"]),
+            (True, "collaborator"),
+        )
+        self.assertEqual((unknown["is_collaboration"], unknown["creator_role"]), (True, "unknown"))
+        self.assertNotIn("role_title", collaborator)
+        serialized = json.dumps(collaborator, ensure_ascii=False)
+        for private_value in ("202", "collaborator-sec", "collaborator-name", "出镜"):
+            self.assertNotIn(private_value, serialized)
+
+        canonical = douyin._aweme_canonical(collaborator, "account-alias", "captured-at")
+        self.assertEqual(canonical["platform_fields"], {
+            "is_collaboration": True,
+            "creator_role": "collaborator",
+        })
+
+    def test_normalize_aweme_requires_explicit_collaboration_marker(self):
+        for cooperation_info in (
+            None,
+            {"extra": "not-json", "co_creators": [{"uid": "202"}]},
+            {"extra": json.dumps({"is_cooperation": 0}), "co_creators": [{"uid": "202"}]},
+            {"co_creators": [{"uid": "202"}]},
+        ):
+            aweme = {"aweme_id": "work-1"}
+            if cooperation_info is not None:
+                aweme["cooperation_info"] = cooperation_info
+            normalized = douyin._normalize_aweme(aweme, {"uid": "202"})
+            self.assertNotIn("is_collaboration", normalized)
+            self.assertNotIn("creator_role", normalized)
+
+    def test_normalize_aweme_uses_unknown_for_conflicting_identity(self):
+        aweme = {
+            "aweme_id": "work-1",
+            "author": {"uid": "same-uid"},
+            "cooperation_info": {
+                "extra": json.dumps({"is_cooperation": 1}),
+                "co_creators": [{"uid": "same-uid", "role_title": "创作支持"}],
+            },
+        }
+        normalized = douyin._normalize_aweme(aweme, {"uid": "same-uid"})
+        self.assertTrue(normalized["is_collaboration"])
+        self.assertEqual(normalized["creator_role"], "unknown")
+
     def test_worklist_empty_diagnostics_helpers(self):
         self.assertTrue(douyin._looks_like_login_page("请扫码登录后继续"))
         self.assertFalse(douyin._looks_like_login_page("作品管理"))
