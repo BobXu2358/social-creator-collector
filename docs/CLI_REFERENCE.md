@@ -142,7 +142,7 @@ dynamics` carry `schema_version` but use command-specific row structures.
 
 | Command | Raw-file envelope keys | Notes |
 |---|---|---|
-| Bilibili summary | `schema_version`, `account`, `platform`, `source`, `captured_at`, `range`, `video_range`, `diagnostics`, `field_notes`, `account_fan_total`, `fan_inc_total`, `fan_trend`, `videos` | `fan_trend` rows are `fan_trend_row`; `videos` rows are `video_row`; `diagnostics.request_timing` reports the bounded acquisition budget and per-stage timings. |
+| Bilibili summary | `schema_version`, `account`, `platform`, `source`, `captured_at`, `range`, `video_range`, `diagnostics`, `field_notes`, `account_fan_total`, `fan_inc_total`, `fan_trend`, `videos` | `fan_trend` rows are `fan_trend_row`; `videos` rows are `video_row`; `diagnostics.request_timing` reports the bounded acquisition budget and per-stage timings; `diagnostics.huahuo_orders` reports privacy-safe availability and aggregate match counts. |
 | Bilibili video-detail | `schema_version`, `account`, `platform`, `source`, `captured_at`, `bvid`, `cid`, `field_notes`, `video` | `video` is a `video_row`. |
 | Bilibili fan-source | `schema_version`, `account`, `platform`, `source`, `captured_at`, `source_total`, `sources` | Command-specific `sources` rows. |
 | Bilibili dynamics | `schema_version`, `account`, `platform`, `source`, `captured_at`, `host_mid`, `window_days`, `count`, `by_type`, `lottery_count`, `dynamics` | Command-specific `dynamics` rows. |
@@ -164,6 +164,49 @@ Canonical row shapes are defined in `schemas/collector-output.schema.json`:
 
 Comments, danmaku, dynamics rows, and fan-source rows use command-specific
 structures that are not covered by the JSON Schema `$defs`.
+
+### Bilibili Huahuo order matching
+
+After `bilibili summary` retrieves the authenticated creator account's complete
+Huahuo order history, each returned video includes one boolean at
+`videos[].platform_fields.is_huahuo_order`:
+
+```json
+{
+  "content_id": "BV_SANITIZED",
+  "platform_fields": {
+    "is_huahuo_order": true
+  }
+}
+```
+
+- `true` is a direct equality match between the video's `content_id` and at least
+  one Huahuo order `bv_id`; no title, date, hashtag, brand, or text inference is used.
+- `false` means the complete, successfully retrieved order history contained no
+  matching `bv_id`. It does not prove the video is non-commercial: private or
+  off-platform deals are outside this field's scope.
+- An absent field means Huahuo history was unavailable, malformed, changed during
+  pagination, exceeded the safety limit, or otherwise could not be retrieved
+  completely. Consumers must treat absence as unknown, never as `false`.
+
+The match is account-context-sensitive because the order history belongs to the
+authenticated creator account. The collector retains BVID membership only in
+memory and never persists order numbers, counterparties, customer or brand names,
+prices, creator identity fields, raw order rows, or the BVID index. The envelope's
+`diagnostics.huahuo_orders` contains only `available` and, on success, aggregate
+order/page/BVID/matched-video counts.
+
+Downstream consumers should branch on presence before reading the boolean:
+
+```python
+platform_fields = row.get("platform_fields") or {}
+if "is_huahuo_order" not in platform_fields:
+    mark_commercial_status_unknown(row)
+elif platform_fields["is_huahuo_order"] is True:
+    mark_confirmed_huahuo_order(row)
+else:
+    mark_no_huahuo_match(row)  # not a generic "non-commercial" classification
+```
 
 Douyin worklist rows may include two normalized collaboration fields under
 `platform_fields`:

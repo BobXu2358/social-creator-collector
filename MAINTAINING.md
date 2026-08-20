@@ -113,6 +113,10 @@ on a real account before tagging.
   `follower_plays` to `fan_total_on_date`, because the series is the account follower
   total for that date, not follower plays.
 
+- `videos[].platform_fields.is_huahuo_order` is an additive optional 2.0 field. It is
+  present only after a complete Bilibili Huahuo history fetch, so consumers must preserve
+  the distinction between absent, `false`, and `true`; no schema-version bump is required.
+
 - **Additive** change (new optional metric key, new field) → same version. Consumers using
   `.get()` are unaffected.
 - **Breaking** change (rename/remove a field, change a meaning) → bump `SCHEMA_VERSION` and

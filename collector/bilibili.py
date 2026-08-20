@@ -125,8 +125,10 @@ _ACTIVE_SUMMARY_BUDGET: contextvars.ContextVar[_SummaryBudget | None] = contextv
 
 def _request_stage(url: str, params: dict[str, Any] | None) -> str:
     path = urllib.parse.urlsplit(url).path
-    if params and "pn" in params:
-        return f"{path} page={params['pn']}"
+    if params:
+        page = params.get("pn", params.get("page"))
+        if page is not None:
+            return f"{path} page={page}"
     return path
 
 
@@ -407,6 +409,113 @@ def _archive_compare_by_bvid(client: httpx.Client, *, size: int = 50) -> dict[st
     return {str(it["bvid"]): it for it in items if isinstance(it, dict) and it.get("bvid")}
 
 
+_HUAHUO_ORDER_LIST = (
+    "https://cm.bilibili.com/commercialorder/api/web_api/v1/upper/order/list"
+)
+_BVID_RE = re.compile(r"^BV[0-9A-Za-z]{10}$")
+
+
+def _huahuo_order_index(
+    client: httpx.Client, *, page_size: int = 100, max_pages: int = 20,
+) -> dict[str, Any]:
+    """Read the complete Huahuo order history and retain only BVID membership.
+
+    The response also contains order numbers, counterparties, brands, amounts,
+    and other private business data. None of those fields leave this function.
+    Incomplete or changing pagination fails closed so callers do not emit a
+    misleading ``False`` classification from a partial order history.
+    """
+    if page_size < 1 or max_pages < 1:
+        raise ValueError("page_size and max_pages must be positive")
+
+    expected_total: int | None = None
+    rows_seen = 0
+    orders_with_bvid = 0
+    bvids: set[str] = set()
+
+    for page in range(1, max_pages + 1):
+        obj = _get_json(
+            client, _HUAHUO_ORDER_LIST, {"page": page, "size": page_size},
+            retries=1, backoff_s=0.2,
+        )
+        if obj.get("status") not in (None, "success"):
+            raise CollectorError("Bilibili Huahuo order history returned an unsuccessful status")
+        result = obj.get("result")
+        if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+            raise CollectorError("Bilibili Huahuo order history returned a malformed result")
+        try:
+            reported_total = int(result["total"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CollectorError("Bilibili Huahuo order history omitted a valid total") from exc
+        if reported_total < 0:
+            raise CollectorError("Bilibili Huahuo order history returned a negative total")
+        if expected_total is None:
+            expected_total = reported_total
+        elif reported_total != expected_total:
+            raise CollectorError("Bilibili Huahuo order history changed during pagination")
+
+        rows = result["data"]
+        if not rows and rows_seen < expected_total:
+            raise CollectorError("Bilibili Huahuo order history is incomplete")
+        rows_seen += len(rows)
+        if rows_seen > expected_total:
+            raise CollectorError("Bilibili Huahuo order history exceeds its reported total")
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            bvid = row.get("bv_id")
+            if isinstance(bvid, str) and _BVID_RE.fullmatch(bvid):
+                orders_with_bvid += 1
+                bvids.add(bvid)
+
+        if rows_seen == expected_total:
+            return {
+                "bvids": bvids,
+                "orders_total": expected_total,
+                "orders_with_bvid": orders_with_bvid,
+                "pages": page,
+            }
+
+    raise CollectorError("Bilibili Huahuo order history is incomplete after the page limit")
+
+
+def _optional_huahuo_order_index(
+    client: httpx.Client,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Return a privacy-safe optional Huahuo index and aggregate diagnostics."""
+    try:
+        index = _huahuo_order_index(client)
+        diagnostics = {
+            "available": True,
+            "orders_total": index["orders_total"],
+            "orders_with_bvid": index["orders_with_bvid"],
+            "unique_bvids": len(index["bvids"]),
+            "pages": index["pages"],
+        }
+    except (CollectorError, AttributeError, KeyError, TypeError, ValueError):
+        return None, {"available": False}
+    return index, diagnostics
+
+
+def _apply_huahuo_order_flags(
+    videos: list[dict[str, Any]], index: dict[str, Any] | None,
+) -> int | None:
+    """Annotate summary rows only when a complete Huahuo index is available."""
+    if index is None:
+        return None
+    matched_videos = 0
+    for row in videos:
+        platform_fields = row.get("platform_fields")
+        if not isinstance(platform_fields, dict):
+            platform_fields = {}
+            row["platform_fields"] = platform_fields
+        is_huahuo_order = row.get("content_id") in index["bvids"]
+        platform_fields["is_huahuo_order"] = is_huahuo_order
+        matched_videos += int(is_huahuo_order)
+    return matched_videos
+
+
 def _account_fan_total(client: httpx.Client, mid: Any) -> int | None:
     """Current account-level total follower count (账号当前粉丝总数).
 
@@ -442,6 +551,7 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
     cookie = cookie_header(creds)
     referer = "https://member.bilibili.com/york/data-center-web?tmid=&bvid=&tab="
     budget = _SummaryBudget()
+    huahuo_diagnostics: dict[str, Any] = {"available": False}
     budget_token = _ACTIVE_SUMMARY_BUDGET.set(budget)
     try:
       with _client(cookie, referer) as c:
@@ -522,6 +632,11 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
             last_pub = _date_from_epoch(last_pubtime)
             if last_pub and last_pub.date() < video_start:
                 break
+
+        huahuo_index, huahuo_diagnostics = _optional_huahuo_order_index(c)
+        matched_videos = _apply_huahuo_order_flags(videos, huahuo_index)
+        if matched_videos is not None:
+            huahuo_diagnostics["matched_videos"] = matched_videos
     except CollectorError as exc:
         diagnostics = budget.diagnostics()
         raise CollectorError(
@@ -540,7 +655,10 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
         "range": {"start": start.isoformat(), "end": latest.isoformat(), "days": days},
         "video_range": {"start": video_start.isoformat(), "end": video_latest.isoformat(), "days": days},
         "captured_at": captured,
-        "diagnostics": {"request_timing": budget.diagnostics()},
+        "diagnostics": {
+            "request_timing": budget.diagnostics(),
+            "huahuo_orders": huahuo_diagnostics,
+        },
         "field_notes": {
             "duration_s": "Video duration in seconds, from creator archive data or public view metadata.",
             "cover_url": "Cover image URL from creator archive data or public view metadata.",
@@ -552,6 +670,10 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
                                  "null = could not be captured, NOT zero.",
             "fan_inc_total": "Net new fans summed over THIS window only (Σ fan_trend.fan_inc) — a period "
                              "delta, not the account total. Replaces the misleadingly named fan_total.",
+            "platform_fields.is_huahuo_order": "Direct BVID match against the complete Huahuo order history "
+                                                "for this creator account. Present only when that history was "
+                                                "retrieved successfully; false does not rule out off-platform "
+                                                "commercial deals.",
         },
         "account_fan_total": account_fan_total,
         "fan_inc_total": sum(r["fan_inc"] for r in fan_rows),
@@ -587,6 +709,9 @@ def summary(*, ws: Path, account: str, credential_path: Path, days: int) -> dict
             detail.append(f"{int(v['duration_s'])}s")
         if v.get("category"):
             detail.append(str(v["category"]))
+        huahuo_flag = (v.get("platform_fields") or {}).get("is_huahuo_order")
+        if huahuo_flag is not None:
+            detail.append(f"Huahuo order: {'yes' if huahuo_flag else 'no'}")
         detail_text = f" ({', '.join(detail)})" if detail else ""
         lines.append(
             f"- {(v['published_at'] or '')[:16].replace('T', ' ')} `{v['content_id']}` {v['title']} — "

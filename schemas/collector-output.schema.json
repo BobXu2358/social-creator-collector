@@ -67,6 +67,12 @@
         "platform_fields": {
           "type": "object",
           "description": "Raw platform-specific fields preserved for diagnostics when semantics are not canonicalized.",
+          "properties": {
+            "is_huahuo_order": {
+              "type": "boolean",
+              "description": "Bilibili summary only. Direct BVID membership in the complete Huahuo order history for the authenticated creator account. Present only after the full history is retrieved successfully. false means no matching Huahuo order, not that the video is non-commercial through every channel."
+            }
+          },
           "additionalProperties": true
         },
         "detail": {

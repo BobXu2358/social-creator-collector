@@ -153,6 +153,73 @@ class CliBehavior(unittest.TestCase):
 
 
 class PureParsers(unittest.TestCase):
+    def test_bilibili_huahuo_orders_paginate_and_minimize(self):
+        private_values = {
+            "order_no": "ORDER-SECRET-1",
+            "customer_company_name": "Private Customer",
+            "brand_name": "Private Brand",
+            "price": 123456,
+        }
+        pages = {
+            1: [
+                {"bv_id": "BV1xx411c7mD", **private_values},
+                {"bv_id": "", **private_values},
+            ],
+            2: [
+                {"bv_id": "BV1xx411c7mD", **private_values},
+                {"bv_id": "BV1yy411c7mE", **private_values},
+            ],
+        }
+        calls = []
+
+        def _get_json(_client, _url, params=None, **_kwargs):
+            calls.append(dict(params or {}))
+            return {
+                "code": 0,
+                "status": "success",
+                "result": {"data": pages[params["page"]], "page": params["page"], "total": 4},
+            }
+
+        with patch.object(bilibili, "_get_json", side_effect=_get_json):
+            index = bilibili._huahuo_order_index(object(), page_size=2)
+
+        self.assertEqual(calls, [{"page": 1, "size": 2}, {"page": 2, "size": 2}])
+        self.assertEqual(index["bvids"], {"BV1xx411c7mD", "BV1yy411c7mE"})
+        self.assertEqual(index["orders_total"], 4)
+        self.assertEqual(index["orders_with_bvid"], 3)
+        self.assertEqual(index["pages"], 2)
+        self.assertNotIn("ORDER-SECRET-1", repr(index))
+        self.assertNotIn("Private Customer", repr(index))
+        self.assertNotIn("Private Brand", repr(index))
+        self.assertNotIn("123456", repr(index))
+
+    def test_bilibili_huahuo_orders_fail_on_incomplete_history(self):
+        with patch.object(bilibili, "_get_json", return_value={
+            "code": 0,
+            "status": "success",
+            "result": {"data": [], "page": 1, "total": 1},
+        }):
+            with self.assertRaisesRegex(CollectorError, "incomplete"):
+                bilibili._huahuo_order_index(object())
+
+    def test_bilibili_huahuo_orders_are_optional(self):
+        with patch.object(
+            bilibili, "_huahuo_order_index", side_effect=CollectorError("private failure detail"),
+        ):
+            index, diagnostics = bilibili._optional_huahuo_order_index(object())
+
+        self.assertIsNone(index)
+        self.assertEqual(diagnostics, {"available": False})
+        self.assertNotIn("private failure detail", repr(diagnostics))
+
+    def test_bilibili_huahuo_flags_are_omitted_when_history_is_unavailable(self):
+        videos = [{"content_id": "BV1xx411c7mD", "platform_fields": {"existing": 1}}]
+
+        matched = bilibili._apply_huahuo_order_flags(videos, None)
+
+        self.assertIsNone(matched)
+        self.assertEqual(videos[0]["platform_fields"], {"existing": 1})
+
     def test_parse_fan_growth_int(self):
         self.assertEqual(douyin._parse_int("2,383"), 2383)
         self.assertEqual(douyin._parse_int("+76"), 76)
@@ -228,6 +295,12 @@ class PureParsers(unittest.TestCase):
                 patch.object(bilibili, "_account_fan_total", return_value=100),
                 patch.object(bilibili, "_archive_compare_by_bvid", return_value={}),
                 patch.object(bilibili, "_bilibili_video_row_extra", return_value={}),
+                patch.object(bilibili, "_huahuo_order_index", return_value={
+                    "bvids": {"BV13"},
+                    "orders_total": 2,
+                    "orders_with_bvid": 1,
+                    "pages": 1,
+                }),
             ):
                 output = bilibili.summary(
                     ws=ws, account="xgame", credential_path=credential_path, days=3,
@@ -247,8 +320,25 @@ class PureParsers(unittest.TestCase):
             "2026-07-10", "2026-07-11", "2026-07-12",
         ])
         self.assertEqual([row["content_id"] for row in payload["videos"]], ["BV13", "BV11"])
+        self.assertEqual(
+            [row["platform_fields"]["is_huahuo_order"] for row in payload["videos"]],
+            [True, False],
+        )
+        self.assertEqual(payload["diagnostics"]["huahuo_orders"], {
+            "available": True,
+            "orders_total": 2,
+            "orders_with_bvid": 1,
+            "unique_bvids": 1,
+            "pages": 1,
+            "matched_videos": 1,
+        })
+        self.assertIn("false does not rule out off-platform commercial deals", payload["field_notes"][
+            "platform_fields.is_huahuo_order"
+        ])
         self.assertIn("Fan trend range: 2026-07-10 → 2026-07-12", markdown)
         self.assertIn("Video range: 2026-07-11 → 2026-07-13", markdown)
+        self.assertIn("Huahuo order: yes", markdown)
+        self.assertIn("Huahuo order: no", markdown)
 
     def test_import_cookie_verification_requires_positive_signal(self):
         login_body = "请扫码登录后继续"
@@ -1279,7 +1369,7 @@ class SchemaConformance(unittest.TestCase):
             "audit_status": "pass",
             "copyright": 1,
             "is_original": True,
-            "platform_fields": {"forward": 0},
+            "platform_fields": {"forward": 0, "is_huahuo_order": False},
         })
         self._check(row, "video_row")
 
