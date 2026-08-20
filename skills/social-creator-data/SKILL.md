@@ -1,6 +1,6 @@
 ---
 name: social-creator-data
-description: Collect read-only Bilibili and Douyin creator-center data — fan trends, per-video metrics, work lists, and Douyin per-video fan growth (粉丝增量). Use when a user asks to set up, onboard, verify, or run B站/哔哩哔哩 or 抖音 creator backend data collection with Cookie-Editor exports, SESSDATA/bili_jct/buvid3, Douyin creator-center cookies, 涨粉/投币 trends, 稿件数据, or cross-platform creator analytics.
+description: Collect read-only Bilibili and Douyin creator-center data — fan trends, per-video metrics, Bilibili Huahuo order matches, work lists, and Douyin per-video fan growth (粉丝增量). Use when a user asks to set up, onboard, verify, or run B站/哔哩哔哩 or 抖音 creator backend data collection with Cookie-Editor exports, SESSDATA/bili_jct/buvid3, Douyin creator-center cookies, 花火商单, 涨粉/投币 trends, 稿件数据, or cross-platform creator analytics.
 ---
 
 # Social Creator Data
@@ -29,7 +29,8 @@ python -m collector douyin fan-growth --account <account>   # 粉丝增量, DOM-
 ```
 
 `bilibili summary` returns daily fan increments plus per-video play/fans/**coin**/reply/likes
-— that's the涨粉 + 投币 data a monthly performance workflow needs.
+and a Huahuo order match when the complete order history is available — that's the涨粉 +
+投币 + 平台商单确认 data a monthly performance workflow needs.
 
 Its date fields are intentionally different: `range` is the fan-trend API window ending
 on the latest date that API returned, while `video_range` is the video publish window
@@ -45,6 +46,20 @@ the caller:
   is needed;
 - retain a caller-side process timeout (120 seconds is the intended margin) and identify
   the slow endpoint before increasing it to 240 seconds.
+
+## Bilibili Huahuo orders
+
+For each summary row, inspect `platform_fields.is_huahuo_order` by presence first:
+
+- `true` is a direct `content_id == Huahuo bv_id` match for the current account;
+- `false` means the complete history had no match, not that every kind of commercial deal
+  has been ruled out;
+- missing means the order history could not be retrieved completely, so the answer is unknown.
+
+Do not infer the flag from titles, brands, descriptions, dates, or sponsorship language.
+The collector keeps the BVID set in memory and persists only the boolean plus aggregate
+diagnostics; never expose order numbers, counterparties, brands, prices, raw rows, or the
+membership index.
 
 ## Douyin collaborative works
 
