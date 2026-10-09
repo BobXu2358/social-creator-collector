@@ -240,11 +240,21 @@ lists, stdout keys, and raw-file envelope shapes are in `docs/CLI_REFERENCE.md`.
   Douyin detail endpoints reject a raw fetch (the page signs them), so video-detail
   navigates work-detail and intercepts the responses — the same pattern as `comments`.
   All rate fields are pre-normalized to percent. If `item_compare` play metrics are
-  unavailable, the command preserves useful data as a partial result only after every
-  retained detail endpoint is bound to the requested work ID. The `item_compare` request
-  ID alone is only a routing check and cannot bless secondary data. A response without
-  work identity or with unbound/mismatched detail still fails loudly rather than
-  inventing zero metrics.
+  unavailable, the command preserves useful data as a partial result, keeping only detail
+  endpoints whose request carries the requested work ID (the search-keyword request names
+  it `id`, the others `item_id`). An endpoint with no work ID is dropped and listed in
+  `diagnostics.dropped_unbound_data`; an endpoint with a *different* work ID fails the
+  whole command. The `item_compare` request ID alone is only a routing check and cannot
+  bless secondary data. A response without work identity, or with nothing left after
+  binding, still fails loudly rather than inventing zero metrics.
+- **Douyin single-work analysis ages out.** `item_compare` answers `status_code` 10003
+  ("item publish time more than max publish duration") once a work is past the analysis
+  window, so 完播率/平均观看时长 disappear — observed between 30 and 37 days after publish on
+  one account (2026-10). 流量来源/进度/搜索词/画像 lasted longer there (present at 71 days,
+  gone by 91), but treat both boundaries as samples, not a documented contract. Collect
+  `video-detail` within ~30 days of publish if you need play metrics. The command reports
+  this as `diagnostics.reason = item_compare_window_expired`, or a "past the analysis
+  window" error when nothing else is left.
 - **Three platform quirks worth knowing.** Bilibili's `avg_completion_pct` is the mean
   watched fraction (avg progress ÷ duration), not the share who reached the end; its
   "播放量来源" is a *terminal* split (手机/PC/电视), not a recommend/search traffic source —
