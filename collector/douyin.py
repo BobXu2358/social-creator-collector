@@ -1276,13 +1276,24 @@ def _dy_detail_row(*, account: str, captured: str, aweme_id: str, compare: dict[
     return row
 
 
-def _detail_request_aweme_id(url: str) -> str:
+# Extra query keys that carry the work id on specific detail endpoints. The search-keyword
+# request names it `id` (live: every work-detail capture, 2026-10). Scoped per endpoint
+# because a bare `id` is too generic to trust on the others.
+_DETAIL_EXTRA_ID_KEYS = {"search": ("id",)}
+
+# item_compare status_code when the work is older than Douyin's single-work analysis
+# window (status_msg "item publish time more than max publish duration"). The play
+# metrics are gone; other detail endpoints may still answer for a while longer.
+_DY_COMPARE_WINDOW_EXPIRED = 10003
+
+
+def _detail_request_aweme_id(url: str, endpoint: str = "") -> str:
     """Read only the non-secret work id from an intercepted detail request URL."""
     try:
         query = parse_qs(urlparse(url).query)
     except (TypeError, ValueError):
         return ""
-    for key in ("item_id", "aweme_id"):
+    for key in ("item_id", "aweme_id", *_DETAIL_EXTRA_ID_KEYS.get(endpoint, ())):
         values = query.get(key) or []
         if values and values[0] not in (None, ""):
             return str(values[0])
@@ -1339,16 +1350,31 @@ def _detail_metrics_diagnostics(
         available_data.append("audience")
         secondary_bindings.append(("audience", "portrait"))
 
+    window_expired = (compare or {}).get("status_code") == _DY_COMPARE_WINDOW_EXPIRED
     if not available_data:
+        if window_expired:
+            raise CollectorError(
+                f"Douyin no longer serves single-work analysis for aweme_id {aweme_id}: the "
+                "work is past the creator center's analysis window (item_compare status "
+                f"{_DY_COMPARE_WINDOW_EXPIRED}) and no other detail endpoint returned data.")
         raise CollectorError(
             f"Douyin returned no metrics for aweme_id {aweme_id} — wrong id, or the work is not "
             "yours. Pass an aweme_id from `douyin worklist`/`item-analysis`.")
 
+    # Each preserved endpoint is `match` or `missing` here — any `different` id already
+    # raised above. A missing id can't prove the data belongs to this work, so drop that
+    # field rather than emit it, and keep the endpoints that did bind.
     unbound = [label for label, endpoint in secondary_bindings
                if request_ids.get(endpoint) != requested_id]
     if unbound:
-        raise CollectorError(
-            f"Douyin could not bind {', '.join(unbound)} to requested aweme_id {aweme_id}.")
+        for label in unbound:
+            detail.pop(label, None)
+        available_data = [label for label in available_data if label not in unbound]
+        secondary_bindings = [(label, endpoint) for label, endpoint in secondary_bindings
+                              if label not in unbound]
+        if not available_data:
+            raise CollectorError(
+                f"Douyin could not bind {', '.join(unbound)} to requested aweme_id {aweme_id}.")
 
     if item_response_ids:
         identity_source = "item"
@@ -1358,11 +1384,10 @@ def _detail_metrics_diagnostics(
         # Unlike an empty response, useful data inside item_compare is bound to the
         # request that returned it. The request id alone is never sufficient.
         identity_source = "item_compare_request"
-    elif (secondary_bindings and request_ids.get("compare") == requested_id
-          and not unbound):
-        # An empty item_compare can still accompany valid detail endpoints. Require
-        # every preserved endpoint to carry the same work id so a request echo cannot
-        # bless stale/default data from a different work.
+    elif secondary_bindings and request_ids.get("compare") == requested_id:
+        # An empty item_compare can still accompany valid detail endpoints. Every
+        # preserved endpoint carries the same work id (unbound ones were dropped above),
+        # so a request echo cannot bless stale/default data from a different work.
         identity_source = "matched_detail_requests"
     else:
         raise CollectorError(
@@ -1370,11 +1395,15 @@ def _detail_metrics_diagnostics(
             "Pass an aweme_id from `douyin worklist`/`item-analysis`.")
 
     available_data.insert(0, "identity")
-    return {
-        "reason": "item_compare_metrics_unavailable",
+    diagnostics = {
+        "reason": ("item_compare_window_expired" if window_expired
+                   else "item_compare_metrics_unavailable"),
         "identity_source": identity_source,
         "available_data": available_data,
     }
+    if unbound:
+        diagnostics["dropped_unbound_data"] = unbound
+    return diagnostics
 
 
 def _apply_detail_partial_status(result: dict[str, Any], diagnostics: dict[str, Any] | None,
@@ -1382,9 +1411,16 @@ def _apply_detail_partial_status(result: dict[str, Any], diagnostics: dict[str, 
     if not diagnostics:
         return result
     result["partial"] = True
-    result["warning"] = (
-        "item_compare returned no play metrics; preserved the other available "
-        "single-video detail data")
+    if diagnostics.get("reason") == "item_compare_window_expired":
+        warning = ("item_compare play metrics are past Douyin's single-work analysis window; "
+                   "preserved the other available single-video detail data")
+    else:
+        warning = ("item_compare returned no play metrics; preserved the other available "
+                   "single-video detail data")
+    if diagnostics.get("dropped_unbound_data"):
+        warning += ("; dropped " + ", ".join(diagnostics["dropped_unbound_data"])
+                    + " (request carried no work id)")
+    result["warning"] = warning
     if include_diagnostics:
         result["diagnostics"] = diagnostics
     return result
@@ -1415,7 +1451,7 @@ async def _video_detail(ws, account, state_path, aweme_id, chromium):
                         # Retain only the non-secret work id for each intercepted
                         # request, never the signed URL or full query string. Partial
                         # results use these ids to bind every preserved endpoint.
-                        request_aweme_id = _detail_request_aweme_id(url)
+                        request_aweme_id = _detail_request_aweme_id(url, name)
                         if request_aweme_id:
                             grabbed_request_ids[name] = request_aweme_id
                     except Exception:

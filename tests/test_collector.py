@@ -1260,20 +1260,81 @@ class PerVideoDetailHelpers(unittest.TestCase):
                     "source": "7600000000000000000",
                 })
 
-    def test_douyin_detail_metrics_diagnostics_requires_every_secondary_binding(self):
+    def test_douyin_detail_metrics_diagnostics_drops_unbound_endpoint_keeps_bound(self):
+        # Issue #48: search has no work id while compare/source/portrait match.
+        compare = {"item": {}}
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
+            source={"play_source": [{"key": "search", "value": 0.25}]},
+            progress={}, search={"show_from": [{"keyword": "query", "percent": 1}]},
+            portrait={"gender": {"ratio_list": [{"key": "男", "value": 0.8}]}})
+
+        diagnostics = douyin._detail_metrics_diagnostics(
+            aweme_id="7648986531704638726", compare=compare, row=row,
+            request_aweme_ids={
+                "compare": "7648986531704638726",
+                "source": "7648986531704638726",
+                "portrait": "7648986531704638726",
+            })
+
+        self.assertEqual(diagnostics["identity_source"], "matched_detail_requests")
+        self.assertEqual(diagnostics["available_data"],
+                         ["identity", "traffic_source", "audience"])
+        self.assertEqual(diagnostics["dropped_unbound_data"], ["search_keywords"])
+        self.assertNotIn("search_keywords", row["detail"])
+        self.assertIn("traffic_source", row["detail"])
+
+    def test_douyin_detail_metrics_diagnostics_still_rejects_different_secondary_id(self):
         compare = {"item": {}}
         row = douyin._dy_detail_row(
             account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
             source={"play_source": [{"key": "search", "value": 0.25}]},
             progress={}, search={"show_from": [{"keyword": "query", "percent": 1}]}, portrait={})
 
-        with self.assertRaisesRegex(douyin.CollectorError, "could not bind search_keywords"):
+        with self.assertRaisesRegex(douyin.CollectorError, "different work"):
             douyin._detail_metrics_diagnostics(
                 aweme_id="7648986531704638726", compare=compare, row=row,
                 request_aweme_ids={
                     "compare": "7648986531704638726",
                     "source": "7648986531704638726",
+                    "search": "7600000000000000000",
                 })
+
+    def test_douyin_detail_metrics_diagnostics_marks_expired_window(self):
+        compare = {"status_code": 10003, "item": {}}
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
+            source={"play_source": [{"key": "search", "value": 0.25}]},
+            progress={}, search={}, portrait={})
+
+        diagnostics = douyin._detail_metrics_diagnostics(
+            aweme_id="7648986531704638726", compare=compare, row=row,
+            request_aweme_ids={
+                "compare": "7648986531704638726",
+                "source": "7648986531704638726",
+            })
+
+        self.assertEqual(diagnostics["reason"], "item_compare_window_expired")
+        self.assertNotIn("dropped_unbound_data", diagnostics)
+
+    def test_douyin_detail_metrics_diagnostics_expired_window_without_data(self):
+        compare = {"status_code": 10003, "item": {}}
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id="7648986531704638726", compare=compare,
+            source={}, progress={}, search={}, portrait={})
+
+        with self.assertRaisesRegex(douyin.CollectorError, "analysis window"):
+            douyin._detail_metrics_diagnostics(
+                aweme_id="7648986531704638726", compare=compare, row=row,
+                request_aweme_ids={"compare": "7648986531704638726"})
+
+    def test_douyin_detail_request_aweme_id_reads_search_id_key(self):
+        url = ("https://creator.douyin.com/janus/douyin/creator/data/item_analysis/search/"
+               "keyword?aid=2906&id=7648986531704638726")
+        self.assertEqual(douyin._detail_request_aweme_id(url, "search"), "7648986531704638726")
+        # `id` is only trusted on the endpoint known to use it.
+        self.assertEqual(douyin._detail_request_aweme_id(url, "source"), "")
+        self.assertEqual(douyin._detail_request_aweme_id(url), "")
 
     def test_douyin_detail_request_aweme_id_reads_item_id(self):
         self.assertEqual(
@@ -1301,6 +1362,18 @@ class PerVideoDetailHelpers(unittest.TestCase):
         self.assertEqual(raw_result["diagnostics"], diagnostics)
         self.assertTrue(stdout_result["partial"])
         self.assertNotIn("diagnostics", stdout_result)
+
+    def test_douyin_detail_partial_status_warns_on_expired_window_and_dropped_data(self):
+        diagnostics = {
+            "reason": "item_compare_window_expired",
+            "identity_source": "matched_detail_requests",
+            "available_data": ["identity", "traffic_source"],
+            "dropped_unbound_data": ["search_keywords"],
+        }
+        result = douyin._apply_detail_partial_status({}, diagnostics, include_diagnostics=False)
+
+        self.assertIn("analysis window", result["warning"])
+        self.assertIn("dropped search_keywords", result["warning"])
 
     def test_douyin_detail_partial_status_leaves_complete_result_unchanged(self):
         result = {"ok": True}
