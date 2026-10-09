@@ -75,7 +75,10 @@ To ship a change:
 1. Branch → change → `pip install -e ".[dev]" && python -m unittest tests.test_collector`
    (offline tests must pass; CI runs them on every PR across Linux + Windows).
 2. PR → review → merge to `main`.
-3. Bump `collector/__init__.py` to the next package version.
+3. Bump `collector/__init__.py` to the next package version **only as part of the release**,
+   and tag that exact commit. Never bump ahead of a release: untagged `main` builds would
+   report the upcoming version (2.7.0 was reported for months of untagged builds, so a bug
+   report saying "2.7.0" couldn't tell whether a fix was included).
 4. **Tag a release**: `git tag vX.Y.Z && git push --tags`. Without a tag there's nothing to pin.
 5. Consumers bump their pin and re-install.
 

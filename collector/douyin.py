@@ -1281,10 +1281,96 @@ def _dy_detail_row(*, account: str, captured: str, aweme_id: str, compare: dict[
 # because a bare `id` is too generic to trust on the others.
 _DETAIL_EXTRA_ID_KEYS = {"search": ("id",)}
 
-# item_compare status_code when the work is older than Douyin's single-work analysis
-# window (status_msg "item publish time more than max publish duration"). The play
-# metrics are gone; other detail endpoints may still answer for a while longer.
-_DY_COMPARE_WINDOW_EXPIRED = 10003
+# Business status codes the work-detail endpoints return with HTTP 200 (seen live 2026-10).
+# Any other non-zero code is classified `platform_error`.
+_DY_DETAIL_STATUS = {
+    4: "authorization_rejected",      # "spd authorization rejected"
+    10001: "view_count_threshold",    # "view count less than min view count"
+    10003: "publish_duration_limit",  # "item publish time more than max publish duration"
+}
+_DY_DETAIL_STATUS_TEXT = {
+    "authorization_rejected": ("Douyin rejected the detail request's authorization (may be "
+                               "transient — retry later; re-run login if it persists)"),
+    "view_count_threshold": "the work is below Douyin's minimum play count for single-work analysis",
+    "publish_duration_limit": "the work is past the creator center's single-work analysis window",
+}
+# Partial-result `reason` per item_compare classification. item_compare_window_expired
+# shipped in 2.7.0, so it keeps its name.
+_DY_COMPARE_PARTIAL_REASON = {
+    "authorization_rejected": "item_compare_authorization_rejected",
+    "view_count_threshold": "item_compare_view_count_threshold",
+    "publish_duration_limit": "item_compare_window_expired",
+}
+
+
+def _detail_status_code(body: Any) -> int | None:
+    if not isinstance(body, dict):
+        return None
+    try:
+        return int(body.get("status_code"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _detail_status_class(code: int | None) -> str | None:
+    """Classify a non-zero platform status; None for success/absent."""
+    if code in (None, 0):
+        return None
+    return _DY_DETAIL_STATUS.get(code, "platform_error")
+
+
+def _detail_endpoint_has_data(row: dict[str, Any]) -> dict[str, bool]:
+    detail = row.get("detail") or {}
+    progress = detail.get("progress_analysis") or {}
+    return {
+        "compare": bool(row.get("metrics") or detail.get("engagement_rates_pct")
+                        or (detail.get("peer_comparison") or {}).get("peer_count")),
+        "source": bool(detail.get("traffic_source")),
+        "progress": bool(progress.get("drag_back_curve") or progress.get("drag_forward_curve")),
+        "search": bool(detail.get("search_keywords")),
+        "portrait": bool(detail.get("audience")),
+    }
+
+
+def _detail_endpoint_status(*, aweme_id: str, bodies: dict[str, Any],
+                            request_aweme_ids: dict[str, str] | None,
+                            row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Sanitized per-endpoint outcome: platform status, work-id binding, usable data.
+
+    Built from the row *before* unbound fields are dropped. Never carries URLs, query
+    values or response payloads — only the platform's own short status message.
+    """
+    has_data = _detail_endpoint_has_data(row)
+    out = []
+    for endpoint in _DETAIL_TARGETS:
+        if endpoint not in bodies:
+            out.append({"endpoint": endpoint, "captured": False, "classification": "not_captured"})
+            continue
+        body = bodies[endpoint]
+        code = _detail_status_code(body)
+        request_id = str((request_aweme_ids or {}).get(endpoint) or "")
+        if not request_id:
+            binding = "missing"
+        else:
+            binding = "match" if request_id == str(aweme_id) else "different"
+        classification = _detail_status_class(code)
+        if classification is None:
+            if binding == "different":
+                classification = "different_work"
+            elif not has_data[endpoint]:
+                classification = "no_usable_data"
+            elif binding == "missing":
+                classification = "unbound_response"
+            else:
+                classification = "ok"
+        entry = {"endpoint": endpoint, "captured": True, "status_code": code,
+                 "binding": binding, "has_data": has_data[endpoint],
+                 "classification": classification}
+        message = body.get("status_msg") if isinstance(body, dict) else None
+        if code not in (None, 0) and isinstance(message, str) and message:
+            entry["status_message"] = message[:200]
+        out.append(entry)
+    return out
 
 
 def _detail_request_aweme_id(url: str, endpoint: str = "") -> str:
@@ -1298,6 +1384,21 @@ def _detail_request_aweme_id(url: str, endpoint: str = "") -> str:
         if values and values[0] not in (None, ""):
             return str(values[0])
     return ""
+
+
+def _detail_platform_failure(aweme_id: str, endpoint_status: list[dict[str, Any]]
+                             ) -> CollectorError | None:
+    """When nothing usable came back, name the first platform status any endpoint gave."""
+    for entry in endpoint_status:
+        classification = entry.get("classification")
+        if classification in _DY_DETAIL_STATUS_TEXT or classification == "platform_error":
+            cause = _DY_DETAIL_STATUS_TEXT.get(
+                classification, f"Douyin returned status {entry.get('status_code')}")
+            return CollectorError(
+                f"Douyin returned no single-work analysis for aweme_id {aweme_id}: {cause} "
+                f"({entry['endpoint']} status {entry.get('status_code')}).",
+                diagnostics={"reason": classification, "endpoint_status": endpoint_status})
+    return None
 
 
 def _detail_metrics_diagnostics(
@@ -1319,7 +1420,8 @@ def _detail_metrics_diagnostics(
     observed_ids = [*item_response_ids, *request_ids.values()]
     if any(response_id != requested_id for response_id in observed_ids):
         raise CollectorError(
-            f"Douyin returned detail for a different work than requested aweme_id {aweme_id}.")
+            f"Douyin returned detail for a different work than requested aweme_id {aweme_id}.",
+            diagnostics={"reason": "different_work"})
     if item_metrics.get("view_count") not in (None, ""):
         return None
 
@@ -1350,16 +1452,24 @@ def _detail_metrics_diagnostics(
         available_data.append("audience")
         secondary_bindings.append(("audience", "portrait"))
 
-    window_expired = (compare or {}).get("status_code") == _DY_COMPARE_WINDOW_EXPIRED
+    compare_code = _detail_status_code(compare)
+    compare_class = _detail_status_class(compare_code)
     if not available_data:
-        if window_expired:
+        if compare_class in _DY_DETAIL_STATUS_TEXT:
             raise CollectorError(
-                f"Douyin no longer serves single-work analysis for aweme_id {aweme_id}: the "
-                "work is past the creator center's analysis window (item_compare status "
-                f"{_DY_COMPARE_WINDOW_EXPIRED}) and no other detail endpoint returned data.")
+                f"Douyin returned no single-work analysis for aweme_id {aweme_id}: "
+                f"{_DY_DETAIL_STATUS_TEXT[compare_class]} (item_compare status {compare_code}); "
+                "no other detail endpoint returned data.",
+                diagnostics={"reason": compare_class})
+        if compare_class == "platform_error":
+            raise CollectorError(
+                f"Douyin item_compare returned status {compare_code} for aweme_id {aweme_id} "
+                "and no other detail endpoint returned data.",
+                diagnostics={"reason": "platform_error"})
         raise CollectorError(
             f"Douyin returned no metrics for aweme_id {aweme_id} — wrong id, or the work is not "
-            "yours. Pass an aweme_id from `douyin worklist`/`item-analysis`.")
+            "yours. Pass an aweme_id from `douyin worklist`/`item-analysis`.",
+            diagnostics={"reason": "no_usable_data"})
 
     # Each preserved endpoint is `match` or `missing` here — any `different` id already
     # raised above. A missing id can't prove the data belongs to this work, so drop that
@@ -1374,7 +1484,8 @@ def _detail_metrics_diagnostics(
                               if label not in unbound]
         if not available_data:
             raise CollectorError(
-                f"Douyin could not bind {', '.join(unbound)} to requested aweme_id {aweme_id}.")
+                f"Douyin could not bind {', '.join(unbound)} to requested aweme_id {aweme_id}.",
+                diagnostics={"reason": "unbound_response"})
 
     if item_response_ids:
         identity_source = "item"
@@ -1392,12 +1503,13 @@ def _detail_metrics_diagnostics(
     else:
         raise CollectorError(
             f"Douyin returned no metrics and no identifiable item for aweme_id {aweme_id}. "
-            "Pass an aweme_id from `douyin worklist`/`item-analysis`.")
+            "Pass an aweme_id from `douyin worklist`/`item-analysis`.",
+            diagnostics={"reason": "no_identity"})
 
     available_data.insert(0, "identity")
     diagnostics = {
-        "reason": ("item_compare_window_expired" if window_expired
-                   else "item_compare_metrics_unavailable"),
+        "reason": _DY_COMPARE_PARTIAL_REASON.get(
+            compare_class, "item_compare_metrics_unavailable"),
         "identity_source": identity_source,
         "available_data": available_data,
     }
@@ -1411,12 +1523,17 @@ def _apply_detail_partial_status(result: dict[str, Any], diagnostics: dict[str, 
     if not diagnostics:
         return result
     result["partial"] = True
-    if diagnostics.get("reason") == "item_compare_window_expired":
-        warning = ("item_compare play metrics are past Douyin's single-work analysis window; "
-                   "preserved the other available single-video detail data")
-    else:
-        warning = ("item_compare returned no play metrics; preserved the other available "
-                   "single-video detail data")
+    result["partial_reason"] = diagnostics.get("reason")
+    cause = {
+        "item_compare_window_expired": (
+            "item_compare play metrics are past Douyin's single-work analysis window"),
+        "item_compare_view_count_threshold": (
+            "item_compare play metrics are unavailable: the work is below Douyin's minimum "
+            "play count for single-work analysis"),
+        "item_compare_authorization_rejected": (
+            "Douyin rejected item_compare's authorization (may be transient — retry later)"),
+    }.get(diagnostics.get("reason"), "item_compare returned no play metrics")
+    warning = cause + "; preserved the other available single-video detail data"
     if diagnostics.get("dropped_unbound_data"):
         warning += ("; dropped " + ", ".join(diagnostics["dropped_unbound_data"])
                     + " (request carried no work id)")
@@ -1487,23 +1604,35 @@ async def _video_detail(ws, account, state_path, aweme_id, chromium):
                     break
                 await page.wait_for_timeout(1000)
 
-    if "compare" not in grabbed:
-        if _looks_like_login_page(landing_body):
-            raise CollectorError(
-                "Douyin single-video detail landed on a login page — storage state expired; "
-                "re-run login/import-cookies.")
-        raise CollectorError(
-            "could not load Douyin single-video analysis (item_compare) — wrong aweme_id, the "
-            "work is not yours, or Douyin changed work-detail. Update to the latest release or "
-            "report upstream (see AGENTS.md 'Staying current').")
     captured = datetime.now(TZ).isoformat()
     row = _dy_detail_row(account=account, captured=captured, aweme_id=str(aweme_id),
                          compare=grabbed.get("compare") or {}, source=grabbed.get("source") or {},
                          progress=grabbed.get("progress") or {}, search=grabbed.get("search") or {},
                          portrait=grabbed.get("portrait") or {})
-    partial_diagnostics = _detail_metrics_diagnostics(
-        aweme_id=str(aweme_id), compare=grabbed["compare"], row=row,
-        request_aweme_ids=grabbed_request_ids)
+    endpoint_status = _detail_endpoint_status(
+        aweme_id=str(aweme_id), bodies=grabbed, request_aweme_ids=grabbed_request_ids, row=row)
+    if "compare" not in grabbed:
+        if _looks_like_login_page(landing_body):
+            raise CollectorError(
+                "Douyin single-video detail landed on a login page — storage state expired; "
+                "re-run login/import-cookies.",
+                diagnostics={"reason": "login_required", "endpoint_status": endpoint_status})
+        raise CollectorError(
+            "could not load Douyin single-video analysis (item_compare) — wrong aweme_id, the "
+            "work is not yours, or Douyin changed work-detail. Update to the latest release or "
+            "report upstream (see AGENTS.md 'Staying current').",
+            diagnostics={"reason": "item_compare_not_captured", "endpoint_status": endpoint_status})
+    try:
+        partial_diagnostics = _detail_metrics_diagnostics(
+            aweme_id=str(aweme_id), compare=grabbed["compare"], row=row,
+            request_aweme_ids=grabbed_request_ids)
+    except CollectorError as exc:
+        if (exc.diagnostics or {}).get("reason") == "no_usable_data":
+            platform_failure = _detail_platform_failure(str(aweme_id), endpoint_status)
+            if platform_failure:
+                raise platform_failure from exc
+        exc.diagnostics = {**(exc.diagnostics or {}), "endpoint_status": endpoint_status}
+        raise
     result = {
         "schema_version": schema.SCHEMA_VERSION,
         "account": account, "platform": "douyin",
@@ -1517,7 +1646,9 @@ async def _video_detail(ws, account, state_path, aweme_id, chromium):
             "metrics.follower_play_ratio_pct": "粉丝播放占比 (fan_view_proportion), percent.",
             "detail.traffic_source": "播放来源 split (推荐/关注/搜索/个人主页/…), percent shares.",
             "detail.progress_analysis": "Drag-back/forward distribution by playback second (not a still-watching curve).",
+            "endpoint_status": "Per-endpoint platform status_code/status_msg, work-id binding (match/missing/different), usable-data flag and classification; status_code null = endpoint has no status envelope.",
         },
+        "endpoint_status": endpoint_status,
         "video": row,
     }
     _apply_detail_partial_status(result, partial_diagnostics, include_diagnostics=True)

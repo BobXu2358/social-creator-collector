@@ -1375,6 +1375,125 @@ class PerVideoDetailHelpers(unittest.TestCase):
         self.assertIn("analysis window", result["warning"])
         self.assertIn("dropped search_keywords", result["warning"])
 
+    def test_douyin_detail_endpoint_status_classifies_platform_and_binding(self):
+        aid = "7648986531704638726"
+        bodies = {
+            "compare": {"status_code": 10003,
+                        "status_msg": "item publish time more than max publish duration",
+                        "item": {}},
+            "source": {"status_code": 0, "play_source": [{"key": "follow", "value": 0.5}]},
+            "progress": {"status_code": 4, "status_msg": "spd authorization rejected"},
+            "search": {"status_code": 0, "show_from": [{"keyword": "query", "percent": 1}]},
+        }
+        row = douyin._dy_detail_row(
+            account="x", captured="c", aweme_id=aid, compare=bodies["compare"],
+            source=bodies["source"], progress={}, search=bodies["search"], portrait={})
+
+        status = {e["endpoint"]: e for e in douyin._detail_endpoint_status(
+            aweme_id=aid, bodies=bodies, row=row,
+            request_aweme_ids={"compare": aid, "source": aid, "progress": aid})}
+
+        self.assertEqual(status["compare"]["classification"], "publish_duration_limit")
+        self.assertEqual(status["compare"]["status_code"], 10003)
+        self.assertIn("max publish duration", status["compare"]["status_message"])
+        self.assertEqual(status["source"]["classification"], "ok")
+        self.assertNotIn("status_message", status["source"])
+        self.assertEqual(status["progress"]["classification"], "authorization_rejected")
+        self.assertEqual(status["search"]["classification"], "unbound_response")
+        self.assertEqual(status["search"]["binding"], "missing")
+        self.assertEqual(status["portrait"], {"endpoint": "portrait", "captured": False,
+                                              "classification": "not_captured"})
+
+    def test_douyin_detail_endpoint_status_unknown_code_and_empty_ok(self):
+        aid = "7648986531704638726"
+        bodies = {"compare": {"status_code": 99, "status_msg": "x" * 500},
+                  "source": {"status_code": 0}}
+        row = douyin._dy_detail_row(account="x", captured="c", aweme_id=aid, compare={},
+                                    source={}, progress={}, search={}, portrait={})
+
+        status = {e["endpoint"]: e for e in douyin._detail_endpoint_status(
+            aweme_id=aid, bodies=bodies, row=row, request_aweme_ids={"source": aid})}
+
+        self.assertEqual(status["compare"]["classification"], "platform_error")
+        self.assertEqual(len(status["compare"]["status_message"]), 200)
+        self.assertEqual(status["source"]["classification"], "no_usable_data")
+
+    def test_douyin_detail_metrics_diagnostics_partial_reason_per_compare_status(self):
+        aid = "7648986531704638726"
+        for code, reason in ((10001, "item_compare_view_count_threshold"),
+                             (4, "item_compare_authorization_rejected"),
+                             (99, "item_compare_metrics_unavailable")):
+            compare = {"status_code": code, "item": {}}
+            row = douyin._dy_detail_row(
+                account="x", captured="c", aweme_id=aid, compare=compare,
+                source={"play_source": [{"key": "follow", "value": 0.5}]},
+                progress={}, search={}, portrait={})
+            diagnostics = douyin._detail_metrics_diagnostics(
+                aweme_id=aid, compare=compare, row=row,
+                request_aweme_ids={"compare": aid, "source": aid})
+            self.assertEqual(diagnostics["reason"], reason)
+
+    def test_douyin_detail_metrics_diagnostics_failure_carries_reason(self):
+        aid = "7648986531704638726"
+        for compare, reason, text in (
+                ({"status_code": 4, "item": {}}, "authorization_rejected", "retry later"),
+                ({"status_code": 10001, "item": {}}, "view_count_threshold", "minimum play count"),
+                ({"status_code": 99, "item": {}}, "platform_error", "status 99"),
+                ({"status_code": 0, "item": {}}, "no_usable_data", "returned no metrics")):
+            row = douyin._dy_detail_row(account="x", captured="c", aweme_id=aid, compare=compare,
+                                        source={}, progress={}, search={}, portrait={})
+            with self.assertRaisesRegex(douyin.CollectorError, text) as ctx:
+                douyin._detail_metrics_diagnostics(
+                    aweme_id=aid, compare=compare, row=row, request_aweme_ids={"compare": aid})
+            self.assertEqual(ctx.exception.diagnostics, {"reason": reason})
+
+    def test_douyin_detail_platform_failure_names_secondary_status(self):
+        endpoint_status = [
+            {"endpoint": "compare", "captured": True, "status_code": 0,
+             "classification": "no_usable_data"},
+            {"endpoint": "source", "captured": True, "status_code": 4,
+             "classification": "authorization_rejected"},
+        ]
+        exc = douyin._detail_platform_failure("1", endpoint_status)
+
+        self.assertIn("source status 4", str(exc))
+        self.assertEqual(exc.diagnostics["reason"], "authorization_rejected")
+        self.assertIs(exc.diagnostics["endpoint_status"], endpoint_status)
+        self.assertIsNone(douyin._detail_platform_failure("1", endpoint_status[:1]))
+
+    def test_douyin_detail_partial_status_exposes_reason_on_stdout(self):
+        diagnostics = {"reason": "item_compare_view_count_threshold",
+                       "identity_source": "matched_detail_requests",
+                       "available_data": ["identity", "traffic_source"]}
+        result = douyin._apply_detail_partial_status({}, diagnostics, include_diagnostics=False)
+
+        self.assertEqual(result["partial_reason"], "item_compare_view_count_threshold")
+        self.assertIn("minimum play count", result["warning"])
+
+    def test_cli_prints_structured_failure_when_error_has_diagnostics(self):
+        diagnostics = {"reason": "publish_duration_limit",
+                       "endpoint_status": [{"endpoint": "compare", "status_code": 10003}]}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+                douyin, "video_detail",
+                side_effect=CollectorError("too old", diagnostics=diagnostics)):
+            code, out, err = _run("douyin", "video-detail", "--account", "xgame",
+                                  "--workspace", tmp, "--aweme-id", "1")
+
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR: too old", err)
+        self.assertEqual(json.loads(out),
+                         {"ok": False, "error": "too old", "diagnostics": diagnostics})
+
+    def test_cli_failure_without_diagnostics_keeps_stdout_empty(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+                douyin, "video_detail", side_effect=CollectorError("plain")):
+            code, out, err = _run("douyin", "video-detail", "--account", "xgame",
+                                  "--workspace", tmp, "--aweme-id", "1")
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("ERROR: plain", err)
+
     def test_douyin_detail_partial_status_leaves_complete_result_unchanged(self):
         result = {"ok": True}
         self.assertEqual(
