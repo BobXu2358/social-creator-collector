@@ -112,6 +112,12 @@ emits one JSON/Markdown pair per `cid`.
 The JSON object printed to stdout is a command-specific result summary. It is not
 the same object as the persisted raw file.
 
+On failure every command exits non-zero with a one-line `ERROR: …` on stderr. A command
+that can classify the cause also prints `{"ok": false, "error": "…", "diagnostics": {…}}`
+on stdout; currently only `douyin video-detail` does (see
+[Douyin video-detail endpoint status](#douyin-video-detail-endpoint-status-and-failure-reasons)).
+Otherwise stdout stays empty on failure.
+
 | Command | Stdout keys | Notes |
 |---|---|---|
 | `init` | `ok`, `account`, `created` | `created` lists created secret/output/example paths. |
@@ -129,7 +135,7 @@ the same object as the persisted raw file.
 | `douyin fan-trend` | `ok`, `json`, `markdown`, `account_fan_total`, `fan_inc_total`, `rows` | |
 | `douyin worklist` | `ok`, `json`, `markdown`, `account_fan_total`, `items`, `selected` | |
 | `douyin item-analysis` | `ok`, `json`, `markdown`, `items` | |
-| `douyin video-detail` | `ok`, `json`, `markdown`, `aweme_id`, `completion_rate_pct`, `avg_watch_duration_s`, `traffic_sources`; `partial`, `warning` when item metrics are unavailable but identified, request-bound detail data exists | `ok=true, partial=true` does not guarantee every video metric is present; unavailable metrics are omitted. Detail whose request carried no work ID is dropped and named in `warning`; a response without work identity, with a mismatched work ID, or with nothing left after binding still fails. |
+| `douyin video-detail` | `ok`, `json`, `markdown`, `aweme_id`, `completion_rate_pct`, `avg_watch_duration_s`, `traffic_sources`; `partial`, `partial_reason`, `warning` when item metrics are unavailable but identified, request-bound detail data exists | `ok=true, partial=true` does not guarantee every video metric is present; unavailable metrics are omitted. Detail whose request carried no work ID is dropped and named in `warning`; a response without work identity, with a mismatched work ID, or with nothing left after binding still fails. |
 | `douyin fan-growth` | `ok`, `json`, `markdown`, `rows` | |
 | `douyin comments` | `ok`, `json`, `aweme_id`, `comments`; `warning` when no API responses | No `markdown`. |
 
@@ -151,7 +157,7 @@ dynamics` carry `schema_version` but use command-specific row structures.
 | Douyin fan-trend | `schema_version`, `account`, `platform`, `source`, `captured_at`, `range`, `metric_labels`, `field_notes`, `account_fan_total`, `fan_inc_total`, `fan_trend` | `fan_trend` rows are `fan_trend_row`. |
 | Douyin worklist | `schema_version`, `account`, `platform`, `source`, `captured_at`, `range`, `account_fan_total`, `field_notes`, `page_count`, `item_count`, `items`, `selected_items`, `pages`; `warning`, `diagnostics` when no items | `items`/`selected_items` rows are `video_row`; `diagnostics` includes `landing_on_login_page`, `likely_login_required`, `pages`. |
 | Douyin item-analysis | `schema_version`, `account`, `platform`, `source`, `captured_at`, `range`, `field_notes`, `account_overview`, `item_count`, `items`; `warning` when no items | `items` rows are `video_row`. |
-| Douyin video-detail | `schema_version`, `account`, `platform`, `source`, `captured_at`, `aweme_id`, `endpoints_seen`, `field_notes`, `video`; `partial`, `warning`, `diagnostics` when item metrics are unavailable but identified, request-bound detail data exists | `video` is a `video_row`; partial diagnostics use `reason=item_compare_metrics_unavailable` (or `item_compare_window_expired` when `item_compare` returns status 10003 because the work is past Douyin's analysis window), record the non-secret `identity_source`, and list preserved `available_data`; `dropped_unbound_data` (present only when non-empty) lists detail fields removed because their request carried no work ID. No signed URL or full query string is stored. |
+| Douyin video-detail | `schema_version`, `account`, `platform`, `source`, `captured_at`, `aweme_id`, `endpoints_seen`, `endpoint_status`, `field_notes`, `video`; `partial`, `warning`, `diagnostics` when item metrics are unavailable but identified, request-bound detail data exists | `video` is a `video_row`; partial diagnostics use a `reason` from the [partial reasons](#douyin-video-detail-endpoint-status-and-failure-reasons), record the non-secret `identity_source`, and list preserved `available_data`; `dropped_unbound_data` (present only when non-empty) lists detail fields removed because their request carried no work ID. No signed URL or full query string is stored. |
 | Douyin fan-growth | `schema_version`, `account`, `platform`, `metric`, `source`, `captured_at`, `scroll_rounds`, `row_count`, `rows`, `field_notes`, `note` | `rows` are `video_row` with null `content_id`. |
 | Douyin comments | `account`, `platform`, `aweme_id`, `collected_at`, `comment_count`, `api_pages_intercepted`, `comments`; `warning`, `diagnostics` when no API responses | No `schema_version`; `diagnostics` includes `api_pages_intercepted`, `comment_api_seen`, `landing_on_login_page`. |
 
@@ -271,6 +277,61 @@ elapsed time and sanitized `stage_timings`. Re-run with `--debug` only when a tr
 is needed. Inspect the slow stage before increasing an outer timeout from 120 to 240
 seconds; the collector already bounds the upstream request path that caused the original
 intermittent hangs.
+
+### Douyin video-detail endpoint status and failure reasons
+
+Douyin's work-detail endpoints answer HTTP 200 with a business `status_code` /
+`status_msg` envelope. `douyin video-detail` records a sanitized outcome per endpoint
+in the raw file's `endpoint_status` (always present) and in failure `diagnostics`:
+
+```json
+{"endpoint": "compare", "captured": true, "status_code": 10003, "binding": "match",
+ "has_data": false, "classification": "publish_duration_limit",
+ "status_message": "item publish time more than max publish duration"}
+```
+
+- `endpoint`: `compare`, `source`, `progress`, `search`, `portrait` (always all five).
+- `captured: false` means the response never arrived; only `classification:
+  "not_captured"` follows.
+- `status_code`: the platform integer, or `null` when the endpoint has no status
+  envelope. The `progress` endpoint never has one.
+- `binding`: whether the request carried the requested work ID: `match`, `missing`, or
+  `different`.
+- `has_data`: whether the collector found usable fields, judged before any unbound field
+  is dropped.
+- `status_message`: the platform's own text, at most 200 characters, present only for
+  a non-zero status. No URL, query value, header, or payload is ever stored.
+
+| `classification` | Meaning |
+|---|---|
+| `ok` | Status 0/none, bound, usable data. |
+| `authorization_rejected` | Status 4 (`spd authorization rejected`). The platform rejected the signed request. Observed as transient but not documented: retry later, and re-run login if it persists. |
+| `view_count_threshold` | Status 10001 (`view count less than min view count`). The work is below Douyin's play-count floor for single-work analysis. |
+| `publish_duration_limit` | Status 10003 (`item publish time more than max publish duration`). The work is past the analysis window. |
+| `platform_error` | Any other non-zero status. |
+| `different_work` | Request carried another work's ID. The whole command fails. |
+| `unbound_response` | Usable data, but the request carried no work ID. That field is dropped. |
+| `no_usable_data` | Success status but nothing usable. |
+| `not_captured` | No response intercepted. |
+
+Partial results (`partial: true`) set `partial_reason` on stdout and `diagnostics.reason`
+in the raw file. It comes from `item_compare`'s status:
+`item_compare_window_expired` (10003), `item_compare_view_count_threshold` (10001),
+`item_compare_authorization_rejected` (4), otherwise `item_compare_metrics_unavailable`.
+
+On failure, stdout carries `diagnostics.reason` plus `diagnostics.endpoint_status`.
+`reason` is one of `authorization_rejected`, `view_count_threshold`,
+`publish_duration_limit`, `platform_error`, `no_usable_data`, `unbound_response`,
+`different_work`, `no_identity`, `item_compare_not_captured`, or `login_required`.
+
+```python
+if not result.get("ok"):
+    reason = (result.get("diagnostics") or {}).get("reason")
+    if reason == "authorization_rejected":
+        retry_later()
+    elif reason in ("publish_duration_limit", "view_count_threshold"):
+        show_platform_limit(reason)   # not the user's mistake; don't say "wrong id"
+```
 
 ## Date windows and account-level semantics
 

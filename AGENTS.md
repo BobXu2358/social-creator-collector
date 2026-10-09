@@ -175,7 +175,9 @@ Every command prints one indented JSON result object. Outputs land under
 `social/<account>/<platform>/raw/*.json` and, where supported, `processed/*.md`.
 On an unexpected error
 the CLI prints a one-line `ERROR: …` and exits non-zero; pass `--debug` to any command
-for the full traceback.
+for the full traceback. `douyin video-detail` also prints `{"ok": false, "diagnostics":
+{"reason": …, "endpoint_status": […]}}` on stdout when it can classify the failure
+(see `docs/CLI_REFERENCE.md`).
 
 ## Output schema
 
@@ -252,9 +254,11 @@ lists, stdout keys, and raw-file envelope shapes are in `docs/CLI_REFERENCE.md`.
   window, so 完播率/平均观看时长 disappear — observed between 30 and 37 days after publish on
   one account (2026-10). 流量来源/进度/搜索词/画像 lasted longer there (present at 71 days,
   gone by 91), but treat both boundaries as samples, not a documented contract. Collect
-  `video-detail` within ~30 days of publish if you need play metrics. The command reports
-  this as `diagnostics.reason = item_compare_window_expired`, or a "past the analysis
-  window" error when nothing else is left.
+  `video-detail` within ~30 days of publish if you need play metrics. Douyin also answers
+  10001 (below a minimum play count) and 4 (authorization rejected, likely transient).
+  The command surfaces these as `partial_reason` / `diagnostics.reason` and per-endpoint
+  `endpoint_status`, never as a generic "wrong id" — don't tell users the ID is invalid
+  when the reason is a platform limit.
 - **Three platform quirks worth knowing.** Bilibili's `avg_completion_pct` is the mean
   watched fraction (avg progress ÷ duration), not the share who reached the end; its
   "播放量来源" is a *terminal* split (手机/PC/电视), not a recommend/search traffic source —

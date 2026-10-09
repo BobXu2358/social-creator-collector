@@ -18,7 +18,16 @@ _NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
 
 
 class CollectorError(Exception):
-    """User-facing error; the CLI prints it as ``ERROR: ...`` and exits non-zero."""
+    """User-facing error; the CLI prints it as ``ERROR: ...`` and exits non-zero.
+
+    Optional ``diagnostics`` (sanitized: no URLs, tokens or payloads) are also printed as a
+    ``{"ok": false, ...}`` JSON line on stdout so callers can branch on the cause without
+    parsing the message.
+    """
+
+    def __init__(self, message: str = "", *, diagnostics: dict | None = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics
 
 
 def safe_name(value: str, *, kind: str = "name") -> str:

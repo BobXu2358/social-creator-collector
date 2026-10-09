@@ -277,6 +277,9 @@ def main(argv: list[str] | None = None) -> int:
         result = args.func(args)
     except CollectorError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        if exc.diagnostics:
+            print(json.dumps({"ok": False, "error": str(exc), "diagnostics": exc.diagnostics},
+                             ensure_ascii=False, indent=2))
         return 2
     except Exception as exc:  # last-resort guard: never dump a raw traceback at users
         if getattr(args, "debug", False):
