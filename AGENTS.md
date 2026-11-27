@@ -164,7 +164,7 @@ are in `docs/CLI_REFERENCE.md`.
 | `douyin login --account X` | QR scan login (headed browser) → storage state |
 | `douyin check-cookies --account X` | validate a Cookie-Editor export's structure |
 | `douyin import-cookies --account X` | cookies → Playwright storage state + verify login |
-| `douyin worklist --account X --days 30` | creator-center work list + basic metrics + account_fan_total (当前粉丝总数) + confirmed collaboration flag/current-account role when available; `--days 0` means all available works |
+| `douyin worklist --account X --days 30` | creator-center work list + basic metrics + account_fan_total (当前粉丝总数) + confirmed Xingtu order flag (`is_xingtu_order`) + confirmed collaboration flag/current-account role when available; `--days 0` means all available works |
 | `douyin item-analysis --account X --days 30` | per-work avg watch time + 5s完播率 + 2s跳出率 (作品分析批量) |
 | `douyin video-detail --account X --aweme-id ID` | single-video 完播率 + 流量来源 + 进度曲线 + 搜索词 + 观众画像 (分析详情); returns a warned partial result when item metrics are unavailable but other detail data exists |
 | `douyin fan-trend --account X --days 30` | daily net fans + related overview metrics + account_fan_total (当前粉丝总数); `--days` choices `7/15/30`; includes `fan_inc_total` |
@@ -209,6 +209,13 @@ lists, stdout keys, and raw-file envelope shapes are in `docs/CLI_REFERENCE.md`.
   Huahuo match and cannot exclude off-platform deals. If history is unavailable or
   incomplete, the field is absent. Order numbers, counterparties, brands, amounts, raw
   rows, and the BVID index are never persisted.
+- **Douyin Xingtu detection is presence-based on `work_list`.** Because `douyin worklist`
+  queries `work_list?scene=star_atlas`, Douyin attaches `star_atlas_info.log_extra`
+  (`is_star: true`) on Xingtu commercial works and omits `star_atlas_info` otherwise.
+  `douyin worklist` emits `platform_fields.is_xingtu_order: true` only when that explicit
+  marker is present; treat absence as "no Xingtu marker returned" rather than `false`, and
+  never use it to rule out off-platform commercial deals. Tracking IDs (`clickid_natural`,
+  `log_id`) are discarded in memory.
 - **Douyin collaboration metadata is account-context-sensitive.** `douyin worklist` may
   emit `platform_fields.is_collaboration: true` plus `creator_role` (`primary`,
   `collaborator`, or `unknown`). Treat absence as unavailable, not `false`. A collaborator

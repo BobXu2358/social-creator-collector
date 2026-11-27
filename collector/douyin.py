@@ -515,6 +515,46 @@ def _normalize_cooperation(
     return {"is_collaboration": True, "creator_role": role}
 
 
+def _xingtu_order_flag(info: dict[str, Any]) -> bool:
+    """Accept only Douyin's explicit Xingtu (star_atlas) marker from ``log_extra``.
+
+    ``star_atlas_info.log_extra`` is a JSON-in-string object carrying ``is_star: true``
+    plus tracking identifiers such as ``clickid_natural`` and ``log_id``. Only the
+    boolean marker is read; tracking and order identifiers never leave this function.
+    """
+    log_extra = info.get("log_extra")
+    if log_extra is None:
+        log_extra = info.get("LogExtra")
+    if isinstance(log_extra, str):
+        try:
+            log_extra = json.loads(log_extra)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+    if not isinstance(log_extra, dict):
+        return False
+    is_star = log_extra.get("is_star")
+    if isinstance(is_star, bool):
+        return is_star
+    if isinstance(is_star, int):
+        return is_star == 1
+    if isinstance(is_star, str) and is_star.strip() in ("1", "true", "True"):
+        return True
+    return False
+
+
+def _normalize_xingtu_order(aweme: dict[str, Any]) -> dict[str, Any]:
+    """Classify a confirmed Douyin Xingtu (star_atlas) commercial work.
+
+    ``work_list?scene=star_atlas`` attaches ``star_atlas_info`` on Xingtu works and
+    omits it otherwise. Omission stays absent rather than ``False`` because an omitted
+    optional block cannot rule out off-platform deals or unreturned markers.
+    """
+    info = aweme.get("star_atlas_info") or aweme.get("StarAtlasInfo")
+    if not isinstance(info, dict) or not _xingtu_order_flag(info):
+        return {}
+    return {"is_xingtu_order": True}
+
+
 def _aweme_canonical(n: dict[str, Any], account: str, captured_at: str) -> dict[str, Any]:
     """Map an internal normalized aweme to a canonical video row."""
     row = schema.video_row(
@@ -533,6 +573,7 @@ def _aweme_canonical(n: dict[str, Any], account: str, captured_at: str) -> dict[
         "forward": n.get("forward"),
         "is_collaboration": n.get("is_collaboration"),
         "creator_role": n.get("creator_role"),
+        "is_xingtu_order": n.get("is_xingtu_order"),
     }
     platform_fields = {k: v for k, v in platform_fields.items() if v not in (None, "")}
     if platform_fields:
@@ -773,6 +814,7 @@ def _normalize_aweme(
     if item["aweme_id"]:
         item["url"] = f"https://www.douyin.com/video/{item['aweme_id']}"
     item.update(_normalize_cooperation(a, creator_identity))
+    item.update(_normalize_xingtu_order(a))
     return item
 
 
@@ -855,6 +897,9 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
                                                 "absence means unknown, not false.",
             "platform_fields.creator_role": "Current account's role: primary, collaborator, or unknown. Identity values "
                                             "are compared in memory and are never emitted.",
+            "platform_fields.is_xingtu_order": "true only when Douyin work_list (scene=star_atlas) explicitly marks "
+                                               "the work via star_atlas_info.log_extra.is_star; absence means no Xingtu "
+                                               "marker was returned and does not rule out off-platform commercial deals.",
         },
         "page_count": len(pages_meta), "item_count": len(items_c),
         "items": items_c, "selected_items": rows_c, "pages": pages_meta,
@@ -869,18 +914,28 @@ async def _worklist(ws, account, state_path, days, max_pages, chromium) -> dict[
     jp = raw / f"douyin-worklist-{days or 'all'}d-{stamp}.json"
     mp = processed / f"douyin-worklist-{days or 'all'}d-{stamp}.md"
     jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    xingtu_selected = sum(
+        1 for r in rows_c if (r.get("platform_fields") or {}).get("is_xingtu_order") is True
+    )
     lines = [f"# {account} Douyin worklist ({days or 'all'} days)", "",
              f"Captured at: {captured}",
              f"Current fans (账号当前粉丝总数): {account_fan_total:,}" if account_fan_total is not None
              else "Current fans (账号当前粉丝总数): unavailable",
-             f"Items: {len(items_c)}; selected: {len(rows_c)}", "",
-             "| Time | Work ID | Title | Duration | Play | Like | Comment | Share | Collect |",
-             "|---|---|---|---:|---:|---:|---:|---:|---:|"]
+             f"Items: {len(items_c)}; selected: {len(rows_c)}; Xingtu orders in selected: {xingtu_selected}", "",
+             "| Time | Work ID | Title | Flags | Duration | Play | Like | Comment | Share | Collect |",
+             "|---|---|---|---|---:|---:|---:|---:|---:|---:|"]
     for r in rows_c:
         m = r["metrics"]
+        pf = r.get("platform_fields") or {}
+        flags = []
+        if pf.get("is_xingtu_order") is True:
+            flags.append("星图商单")
+        if pf.get("is_collaboration") is True:
+            role = pf.get("creator_role")
+            flags.append(f"共创:{role}" if role else "共创")
         title = (r.get("title") or "").replace("|", "/").replace("\n", " ")[:80]
         pub = (r.get("published_at") or "")[:19].replace("T", " ")
-        lines.append(f"| {pub} | {r.get('content_id', '')} | {title} | "
+        lines.append(f"| {pub} | {r.get('content_id', '')} | {title} | {' '.join(flags)} | "
                      f"{_fmt(r.get('duration_s'))} | "
                      f"{_fmt(m.get('plays'))} | {_fmt(m.get('likes'))} | {_fmt(m.get('comments'))} | "
                      f"{_fmt(m.get('shares'))} | {_fmt(m.get('collects'))} |")

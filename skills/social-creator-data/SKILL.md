@@ -1,6 +1,6 @@
 ---
 name: social-creator-data
-description: Collect read-only Bilibili and Douyin creator-center data — fan trends, per-video metrics, Bilibili Huahuo order matches, work lists, and Douyin per-video fan growth (粉丝增量). Use when a user asks to set up, onboard, verify, or run B站/哔哩哔哩 or 抖音 creator backend data collection with Cookie-Editor exports, SESSDATA/bili_jct/buvid3, Douyin creator-center cookies, 花火商单, 涨粉/投币 trends, 稿件数据, or cross-platform creator analytics.
+description: Collect read-only Bilibili and Douyin creator-center data — fan trends, per-video metrics, Bilibili Huahuo order matches, Douyin Xingtu order markers, work lists, and Douyin per-video fan growth (粉丝增量). Use when a user asks to set up, onboard, verify, or run B站/哔哩哔哩 or 抖音 creator backend data collection with Cookie-Editor exports, SESSDATA/bili_jct/buvid3, Douyin creator-center cookies, 花火商单, 星图商单, 涨粉/投币 trends, 稿件数据, or cross-platform creator analytics.
 ---
 
 # Social Creator Data
@@ -60,6 +60,29 @@ Do not infer the flag from titles, brands, descriptions, dates, or sponsorship l
 The collector keeps the BVID set in memory and persists only the boolean plus aggregate
 diagnostics; never expose order numbers, counterparties, brands, prices, raw rows, or the
 membership index.
+
+## Douyin Xingtu orders
+
+`douyin worklist` queries `work_list?scene=star_atlas` and attaches
+`platform_fields.is_xingtu_order: true` when `aweme.star_atlas_info.log_extra`
+explicitly carries `is_star: true`:
+
+```json
+{
+  "platform_fields": {
+    "is_xingtu_order": true
+  }
+}
+```
+
+- only `is_xingtu_order is True` confirms a Douyin Xingtu (巨量星图) commercial order;
+- Douyin omits `star_atlas_info` on ordinary works, so a missing field means no Xingtu
+  marker was returned — do not treat absence as `false` or use it to rule out off-platform
+  commercial deals;
+- do not infer Xingtu orders from titles, brands, topic anchors (`anchor_info`), or
+  hashtag flags (`cha_list[].is_commerce`);
+- tracking fields inside `star_atlas_info` (`clickid_natural`, `log_id`) are parsed in
+  memory and never persisted.
 
 ## Douyin collaborative works
 

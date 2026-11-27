@@ -639,6 +639,158 @@ class PureParsers(unittest.TestCase):
         self.assertTrue(normalized["is_collaboration"])
         self.assertEqual(normalized["creator_role"], "unknown")
 
+    def test_normalize_aweme_classifies_xingtu_order_without_tracking_leak(self):
+        aweme = {
+            "aweme_id": "work-star-1",
+            "author_user_id": 101,
+            "author": {"uid": "101", "sec_uid": "primary-sec"},
+            "statistics": {"forward_count": 0},
+            "cooperation_info": {
+                "extra": json.dumps({"is_cooperation": 1}),
+                "co_creators": [{"uid": "202"}],
+            },
+            "star_atlas_info": {
+                "log_extra": json.dumps({
+                    "clickid_natural": "secret-click-token",
+                    "is_star": True,
+                    "log_id": "secret-log-id",
+                    "order_id": "9876543210",
+                    "brand_name": "Private Brand",
+                }),
+            },
+        }
+        normalized = douyin._normalize_aweme(aweme, {"uid": "101", "sec_uid": "primary-sec"})
+        self.assertTrue(normalized["is_xingtu_order"])
+        canonical = douyin._aweme_canonical(normalized, "account-alias", "captured-at")
+        self.assertEqual(canonical["platform_fields"], {
+            "forward": 0,
+            "is_collaboration": True,
+            "creator_role": "primary",
+            "is_xingtu_order": True,
+        })
+        serialized = json.dumps({"normalized": normalized, "canonical": canonical}, ensure_ascii=False)
+        for private_value in (
+            "secret-click-token", "secret-log-id", "9876543210", "Private Brand",
+            "clickid_natural", "log_id", "star_atlas_info",
+        ):
+            self.assertNotIn(private_value, serialized)
+
+        # CamelCase / pre-parsed dict / integer 1 variants
+        camel = douyin._normalize_aweme({
+            "AwemeId": "work-star-2",
+            "StarAtlasInfo": {"LogExtra": {"is_star": 1}},
+        })
+        self.assertTrue(camel["is_xingtu_order"])
+
+    def test_normalize_aweme_requires_explicit_xingtu_marker(self):
+        for extra_fields in (
+            {},
+            {"star_atlas_info": None},
+            {"star_atlas_info": {}},
+            {"star_atlas_info": "bad"},
+            {"star_atlas_info": {"log_extra": "not-json"}},
+            {"star_atlas_info": {"log_extra": "[1]"}},
+            {"star_atlas_info": {"log_extra": json.dumps({})}},
+            {"star_atlas_info": {"log_extra": json.dumps({"is_star": False})}},
+            {"star_atlas_info": {"log_extra": json.dumps({"is_star": 0})}},
+            {"star_atlas_info": {"log_extra": json.dumps({"is_star": "0"})}},
+            {"star_atlas_info": {"log_extra": json.dumps({"is_star": 2})}},
+            # Non-order commercial/game tags must never be conflated with Xingtu orders:
+            {"cha_list": [{"is_commerce": True}], "anchor_info": {"type": 13017}},
+        ):
+            aweme = {"aweme_id": "work-plain", **extra_fields}
+            normalized = douyin._normalize_aweme(aweme)
+            self.assertNotIn("is_xingtu_order", normalized)
+            canonical = douyin._aweme_canonical(normalized, "account-alias", "captured-at")
+            self.assertNotIn("is_xingtu_order", canonical.get("platform_fields") or {})
+
+    def test_worklist_persists_xingtu_flag_and_field_notes(self):
+        from contextlib import asynccontextmanager
+
+        class _FakePage:
+            async def goto(self, *_a, **_kw):
+                pass
+
+            async def evaluate(self, _script, _arg=None):
+                return {
+                    "status": 200,
+                    "json": {
+                        "has_more": False,
+                        "aweme_list": [
+                            {
+                                "aweme_id": "1001",
+                                "desc": "星图作品",
+                                "create_time": 1760000000,
+                                "statistics": {"play_count": 500},
+                                "star_atlas_info": {
+                                    "log_extra": json.dumps({
+                                        "clickid_natural": "secret-click",
+                                        "is_star": True,
+                                        "log_id": "secret-log",
+                                    }),
+                                },
+                            },
+                            {
+                                "aweme_id": "1002",
+                                "desc": "普通作品",
+                                "create_time": 1759000000,
+                                "statistics": {"play_count": 300},
+                            },
+                        ],
+                    },
+                }
+
+            async def wait_for_timeout(self, _ms):
+                pass
+
+        class _FakeContext:
+            async def new_page(self):
+                return _FakePage()
+
+        class _FakeBrowser:
+            async def new_context(self, **_kw):
+                return _FakeContext()
+
+        @asynccontextmanager
+        async def _fake_pw():
+            yield object()
+
+        @asynccontextmanager
+        async def _fake_browser(_p, _chromium, **_kw):
+            yield _FakeBrowser()
+
+        async def _fake_markers(*_a, **_kw):
+            return "作品管理"
+
+        async def _fake_user_info(_page):
+            return {"json": {"status_code": 0, "user": {"follower_count": 888, "uid": "101"}}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            state_path = ws / "state.json"
+            state_path.write_text("{}", encoding="utf-8")
+            with (
+                patch.object(douyin, "_import_playwright", return_value=_fake_pw),
+                patch.object(douyin, "_browser", side_effect=_fake_browser),
+                patch.object(douyin, "_body_text_with_markers", side_effect=_fake_markers),
+                patch.object(douyin, "_fetch_creator_user_info", side_effect=_fake_user_info),
+            ):
+                out = douyin.worklist(ws=ws, account="xgame", state_path=state_path,
+                                      days=0, max_pages=1, chromium=None)
+            raw_text = Path(out["json"]).read_text(encoding="utf-8")
+            md_text = Path(out["markdown"]).read_text(encoding="utf-8")
+            payload = json.loads(raw_text)
+
+        self.assertEqual(payload["items"][0]["platform_fields"]["is_xingtu_order"], True)
+        self.assertNotIn("is_xingtu_order", payload["items"][1].get("platform_fields") or {})
+        self.assertIn("off-platform commercial deals",
+                      payload["field_notes"]["platform_fields.is_xingtu_order"])
+        self.assertIn("Xingtu orders in selected: 1", md_text)
+        self.assertIn("星图商单", md_text)
+        for secret in ("secret-click", "secret-log", "clickid_natural", "log_id"):
+            self.assertNotIn(secret, raw_text)
+            self.assertNotIn(secret, md_text)
+
     def test_worklist_empty_diagnostics_helpers(self):
         self.assertTrue(douyin._looks_like_login_page("请扫码登录后继续"))
         self.assertFalse(douyin._looks_like_login_page("作品管理"))
@@ -1561,9 +1713,12 @@ class SchemaConformance(unittest.TestCase):
             "audit_status": "pass",
             "copyright": 1,
             "is_original": True,
-            "platform_fields": {"forward": 0, "is_huahuo_order": False},
+            "platform_fields": {"forward": 0, "is_huahuo_order": False, "is_xingtu_order": True},
         })
         self._check(row, "video_row")
+        bad_row = dict(row, platform_fields={"is_xingtu_order": False})
+        with self.assertRaises(jsonschema.ValidationError):
+            self._check(bad_row, "video_row")
 
     def test_video_row_null_content_id_conforms(self):
         self._check(schema.video_row(

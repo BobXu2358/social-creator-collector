@@ -214,6 +214,45 @@ else:
     mark_no_huahuo_match(row)  # not a generic "non-commercial" classification
 ```
 
+### Douyin Xingtu order detection
+
+In `douyin worklist`, `/janus/douyin/creator/pc/work_list?scene=star_atlas` attaches
+`star_atlas_info.log_extra` (`is_star: true`) on works published under a Douyin
+Xingtu (巨量星图) commercial order and omits `star_atlas_info` otherwise. Confirmed
+rows in `items[]` and `selected_items[]` carry:
+
+```json
+{
+  "content_id": "AWEME_ID_SANITIZED",
+  "platform_fields": {
+    "is_xingtu_order": true
+  }
+}
+```
+
+- `true` is emitted only when `aweme.star_atlas_info.log_extra` explicitly reports
+  `is_star` (`true` / `1`); no title, date, brand, hashtag (`cha_list[].is_commerce`),
+  or topic-anchor (`anchor_info`) heuristic is used.
+- Absence means `work_list` omitted `star_atlas_info` (or did not return a positive
+  `is_star` marker). Consumers must not treat an absent key as `false` or as proof
+  that the work is non-commercial: off-platform commercial deals and any unreturned
+  markers are outside this field's scope.
+- The field is collected in the authenticated creator account's `work_list` context.
+  Tracking and order fields inside `star_atlas_info` (such as `clickid_natural` and
+  `log_id`) are parsed only in memory and are never emitted, logged, or persisted.
+
+Downstream consumers should branch only on an explicit `true` value:
+
+```python
+platform_fields = row.get("platform_fields") or {}
+if platform_fields.get("is_xingtu_order") is True:
+    mark_confirmed_xingtu_order(row)
+else:
+    mark_no_xingtu_marker(row)  # not a generic "non-commercial" classification
+```
+
+### Douyin collaboration metadata
+
 Douyin worklist rows may include two normalized collaboration fields under
 `platform_fields`:
 
