@@ -71,6 +71,11 @@
             "is_huahuo_order": {
               "type": "boolean",
               "description": "Bilibili summary only. Direct BVID membership in the complete Huahuo order history for the authenticated creator account. Present only after the full history is retrieved successfully. false means no matching Huahuo order, not that the video is non-commercial through every channel."
+            },
+            "is_xingtu_order": {
+              "type": "boolean",
+              "const": true,
+              "description": "Douyin worklist only. Present and true only when work_list (scene=star_atlas) explicitly marks the work via star_atlas_info.log_extra.is_star. Absence means no Xingtu marker was returned and does not rule out off-platform commercial deals."
             }
           },
           "additionalProperties": true

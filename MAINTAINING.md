@@ -120,6 +120,12 @@ on a real account before tagging.
   present only after a complete Bilibili Huahuo history fetch, so consumers must preserve
   the distinction between absent, `false`, and `true`; no schema-version bump is required.
 
+- `items[].platform_fields.is_xingtu_order` (and `selected_items[]` in `douyin worklist`)
+  is an additive optional 2.0 field. It is present and `true` only when `work_list`
+  (`scene=star_atlas`) explicitly returns `star_atlas_info.log_extra.is_star`; absence must
+  not be treated as `false` or as proof of non-commercial status. No schema-version bump is
+  required.
+
 - **Additive** change (new optional metric key, new field) → same version. Consumers using
   `.get()` are unaffected.
 - **Breaking** change (rename/remove a field, change a meaning) → bump `SCHEMA_VERSION` and
